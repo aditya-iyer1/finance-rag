@@ -1,0 +1,23 @@
+# Byte-compiled files
+__pycache__/
+*.py[cod]
+
+# Environment files
+.env
+
+# Notebooks cache
+.ipynb_checkpoints
+
+# Streamlit temp
+.streamlit/
+
+# VSCode/IDE stuff
+.vscode/
+*.code-workspace
+
+# Data files
+data/*.csv
+data/*.json
+data/*.pkl
+data/*.db
+data/*.faiss

@@ -1,0 +1,23 @@
+# Core AI
+langchain
+openai
+chromadb
+tiktoken
+
+# PDF Parsing
+PyMuPDF==1.23.7
+
+# Embeddings (lightweight)
+sentence-transformers
+
+# Streamlit UI
+streamlit
+
+# Utilities
+python-dotenv
+numpy
+pandas
+
+# For evaluation + highlighting
+nltk
+scikit-learn
