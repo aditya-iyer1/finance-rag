@@ -5,7 +5,7 @@ chromadb
 tiktoken
 
 # PDF Parsing
-PyMuPDF==1.23.7
+PyMuPDF==1.26.5
 
 # Embeddings (lightweight)
 sentence-transformers
