@@ -1,23 +1,24 @@
-# Byte-compiled files
+# Python cache and junk
 __pycache__/
 *.py[cod]
+*.so
+.ipynb_checkpoints/
 
-# Environment files
+# Virtual environments
+rag/
+env/
+.venv/
+
+# Environment variables
 .env
 
-# Notebooks cache
-.ipynb_checkpoints
+# ChromaDB persistence
+data/chroma_index/
+notebooks/data/chroma_index/
 
-# Streamlit temp
-.streamlit/
-
-# VSCode/IDE stuff
+# VSCode & Mac junk
+.DS_Store
 .vscode/
-*.code-workspace
 
-# Data files
-data/*.csv
-data/*.json
-data/*.pkl
-data/*.db
-data/*.faiss
+# Logs
+*.log
