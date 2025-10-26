@@ -1,51 +1,58 @@
 # Hallucination-Resistant Finance RAG
 
-A Retrieval-Augmented Generation (RAG) system that extracts and answers questions about real-world financial documents (e.g., 10-Ks) — with hallucination detection and grounding evaluation.
+This project implements a Retrieval-Augmented Generation (RAG) pipeline designed to answer questions over real-world financial filings (e.g., 10-Ks), with an emphasis on hallucination resistance and response grounding.
 
-## Features
+## Overview
 
-- ✅ PDF Parsing for 10-Ks and earnings reports
-- ✅ Embedding & Chunking with ChromaDB + SentenceTransformers
-- ✅ LangChain-based QA pipeline with OpenAI / OpenRouter
-- ✅ Streamlit frontend with citations & hallucination score
-- ✅ Evaluation tools for grounding, token attribution, and claim checking
+The system parses raw SEC filings, segments and embeds them using dense retrieval, and queries them via a language model to generate grounded answers. It includes tools for claim attribution, hallucination detection, and interface components for evaluation and interactive QA.
 
-## Project Structure
+## Key Features
 
-```plaintext
+- PDF section parsing and chunking for 10-K filings  
+- Sentence-transformer embeddings stored in persistent ChromaDB  
+- Top-k vector retrieval for grounding context  
+- LangChain-based QA chains (OpenAI / OpenRouter compatible)  
+- Modular support for response generation, evaluation, and UI  
+- Built-in tools for scoring factual consistency and token attribution  
+
+## Directory Structure
+
+```
 hallucination-resistant-finance-rag/
 │
-├── data/                    # Raw and processed financial documents
-│   └── raw_pdfs/
+├── data/                    # Raw PDFs and persistent ChromaDB
+│   ├── raw_pdfs/
+│   └── chroma_index/
 │
-├── rag_pipeline/           # Core logic
-│   ├── parser/             # PDF loading and chunking
-│   ├── retriever/          # Embedding and vector DB
-│   ├── llm/                # LangChain QA chains
-│   └── evaluation/         # Grounding, scoring, attribution
+├── rag_pipeline/           # Core application code
+│   ├── parser/             # PDF loading, section parsing, chunking
+│   ├── retriever/          # Embedding, vector DB storage & querying
+│   ├── llm/                # QA chain construction and generation logic
+│   └── evaluation/         # Grounding, hallucination, attribution tools
 │
-├── streamlit_app/          # Interactive UI
+├── streamlit_app/          # (Planned) Streamlit frontend for QA interface
 │
-├── notebooks/              # Experiments, eval visualization
+├── notebooks/              # Jupyter notebooks for testing and experimentation
 │
-├── tests/                  # Unit tests for pipeline modules
+├── tests/                  # (Optional) Unit and integration tests
 │
-├── requirements.txt        # Dependencies
-├── README.md               # Project overview
+├── embed_chunks_cli.py     # CLI script for end-to-end embedding
+├── requirements.txt        # Dependency list
+├── README.md               # Project overview and usage guide
 └── .gitignore              # Git exclusions
 ```
 
-## Setup
+## Setup Instructions
 
 ```bash
-# Clone the repo
-git clone git@github.com:aditya-iyer1/finance-rag.git
+# Clone repository
+git clone https://github.com/aditya-iyer1/finance-rag.git
 cd finance-rag
 
-# Create virtual environment
+# Create and activate virtual environment
 python -m venv rag
 source rag/bin/activate
 
-# Install dependencies
+# Install Python dependencies
 pip install -r requirements.txt
 ```
