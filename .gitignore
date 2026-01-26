@@ -22,3 +22,6 @@ notebooks/data/chroma_index/
 
 # Logs
 *.log
+
+# Cursor files
+.cursor/

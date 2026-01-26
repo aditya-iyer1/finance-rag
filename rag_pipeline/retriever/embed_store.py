@@ -21,17 +21,21 @@ from chromadb import PersistentClient
 import os
 
 def store_in_chroma(embedded_chunks, persist_dir="data/chroma_index"):
+    """
+    Store chunks in ChromaDB using the same path resolution as retrieve.py.
+    This ensures embed_chunks_cli.py writes to the same index that query_chunks() reads from.
+    """
     print("📦 Storing in ChromaDB...")
     
     # Convert to absolute path relative to project root
     if not os.path.isabs(persist_dir):
-        # Get project root (2 levels up from this file)
+        # Get project root (3 levels up from this file: rag_pipeline/retriever/embed_store.py -> project root)
         project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         persist_dir = os.path.join(project_root, persist_dir)
     
     client = PersistentClient(path=persist_dir)
 
-    # ⚠️ Must explicitly name the collection to retrieve it later
+    # Collection name must match retrieve.py: "finance_rag"
     collection = client.get_or_create_collection(name="finance_rag")
 
     # Batch all chunks together for efficient storage

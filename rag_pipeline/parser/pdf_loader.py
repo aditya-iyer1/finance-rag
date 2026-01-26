@@ -24,29 +24,29 @@ def extract_raw_text_from_pdf(path: str) -> str:
 	return text
 
 def split_into_sections(text: str) -> Dict[str, str]:
-	'''
-	Split 10-K or financial document into meaninful sections based on SEC-style item headers.
+    pattern = re.compile(r"(ITEM\s+\d+[A]?(?:\.\d+)?\.?\s+.+?)(?=\nITEM\s+\d+[A]?|\Z)", re.IGNORECASE | re.DOTALL)
+    matches = list(pattern.finditer(text))
+    sections = {}
 
-	Returns:
-		Dict of {section_header: section_text}
-	'''
+    covered_spans = []
+    for i, match in enumerate(matches):
+        title_line = match.group(1).split('\n')[0].strip()
+        content = match.group(1).strip()
+        covered_spans.append((match.start(), match.end()))
 
-	# Regex patter to find 10-K item headers
-	pattern = re.compile(r"(ITEM\s+\d+[A]?(?:\.\d+)?\.?\s+.+?)(?=\nITEM\s+\d+[A]?|\Z)", re.IGNORECASE | re.DOTALL)
+        if title_line in sections:
+            title_line = f"{title_line} (part {i})"
 
-	matches = list(pattern.finditer(text))
-	sections = {}
+        sections[title_line] = content
 
-	for i, match in enumerate(matches):
-		title_line = match.group(1).split('\n')[0].strip()
-		content = match.group(1).strip()
+    # Append leftover text (outside ITEMs)
+    last_match_end = covered_spans[-1][1] if covered_spans else 0
+    if last_match_end < len(text):
+        leftover = text[last_match_end:].strip()
+        if len(leftover) > 100:  # skip short footers or blanks
+            sections["EXHIBITS / CERTIFICATIONS / MISC"] = leftover
 
-		if title_line in sections:
-			title_line = f"{title_line} (part {i})"
-
-		sections[title_line] = content
-
-	return sections
+    return sections
 
 def parse_pdf_sections(path: str) -> Dict[str, str]:
 	'''
