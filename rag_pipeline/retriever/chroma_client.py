@@ -73,6 +73,28 @@ def get_collection(persist_dir: str = DEFAULT_PERSIST_DIR, collection_name: str 
     return client.get_collection(name=collection_name)
 
 
+def is_single_doc_mode(persist_dir: str = DEFAULT_PERSIST_DIR) -> bool:
+    """
+    Detect if we're in single-document mode (only one doc_id in the collection).
+    In single-doc mode, entity terms should be downweighted.
+    """
+    try:
+        collection = get_collection(persist_dir, COLLECTION_NAME)
+        # Get all metadata to count unique doc_ids
+        all_data = collection.get(include=["metadatas"])
+        if not all_data or "metadatas" not in all_data:
+            return True  # Default to single-doc if no metadata
+        
+        doc_ids = set()
+        for metadata in all_data["metadatas"]:
+            if isinstance(metadata, dict) and "doc_id" in metadata:
+                doc_ids.add(metadata["doc_id"])
+        
+        return len(doc_ids) <= 1
+    except Exception:
+        return True  # Default to single-doc on error
+
+
 def debug_chroma(persist_dir: str = DEFAULT_PERSIST_DIR):
     """
     Debug function to verify ChromaDB setup.
@@ -94,6 +116,7 @@ def debug_chroma(persist_dir: str = DEFAULT_PERSIST_DIR):
         collection = get_collection(persist_dir, COLLECTION_NAME)
         count = collection.count()
         print(f"   Chunk count: {count}")
+        print(f"   Single-doc mode: {is_single_doc_mode(persist_dir)}")
     else:
         print(f"⚠️  Collection '{COLLECTION_NAME}' NOT FOUND")
         print(f"   Available collections: {[c.name for c in collections]}")

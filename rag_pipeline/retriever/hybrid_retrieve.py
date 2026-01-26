@@ -1,63 +1,193 @@
 # rag_pipeline/retriever/hybrid_retrieve.py
 
-from typing import List, Dict
+"""
+Generalized hybrid retrieval with intent-based scoring and fallback.
+Works across many finance question types without brittle query-specific fixes.
+"""
+
+from typing import List, Dict, Tuple
 from sentence_transformers import SentenceTransformer
-from rag_pipeline.retriever.chroma_client import get_collection
+from rag_pipeline.retriever.chroma_client import get_collection, is_single_doc_mode
 from rag_pipeline.retriever.retrieve import get_embedder
+from rag_pipeline.retriever.intent_classifier import (
+    classify_intent, get_intent_synonyms, get_evidence_patterns, extract_entity_terms
+)
+import re
 
 # Embedding model must match ingestion (same as retrieve.py)
 EMBEDDING_MODEL_NAME = "sentence-transformers/paraphrase-MiniLM-L3-v2"
 
+# Constants
+MIN_CHUNK_CHARS = 200
+DEBUG = True  # Set to False to disable debug prints
 
-# In keyword_filter(), fix keyword extraction to strip punctuation:
 
-def keyword_filter(chunks: List[Dict], query: str) -> List[Dict]:
-    """Filter chunks that contain query keywords in text or metadata."""
-    import re
-    # Extract meaningful keywords (words longer than 3 chars, excluding common stopwords)
-    query_lower = query.lower()
-    # Strip punctuation from query before splitting
-    query_clean = re.sub(r'[^\w\s]', ' ', query_lower)
-    stopwords = {'where', 'is', 'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by'}
-    keywords = [w for w in query_clean.split() if len(w) > 3 and w not in stopwords]
+def score_chunk(chunk: Dict, intent_types: List[str], intent_synonyms: set, 
+                evidence_patterns: List[str], entity_terms: List[str], 
+                single_doc_mode: bool) -> Tuple[float, int, int, int, bool]:
+    """
+    Score a chunk based on intent coverage and evidence patterns.
     
-    # If no good keywords, use all words longer than 2 chars
-    if not keywords:
-        keywords = [w for w in query_clean.split() if len(w) > 2]
+    Returns:
+        (total_score, intent_match_count, evidence_pattern_hits, entity_match_count, has_evidence)
+    """
+    text_lower = chunk.get("text", "").lower()
+    text_original = chunk.get("text", "")  # Keep original for capitalization
+    metadata = chunk.get("metadata", {})
+    metadata_str = " ".join(str(v).lower() for v in metadata.values())
+    combined_text = f"{text_lower} {metadata_str}"
+    
+    # Count intent matches (using word boundaries)
+    intent_match_count = 0
+    for synonym in intent_synonyms:
+        pattern = r'\b' + re.escape(synonym.lower()) + r'\b'
+        if re.search(pattern, combined_text, re.IGNORECASE):
+            intent_match_count += 1
+    
+    # Count evidence pattern hits
+    evidence_pattern_hits = 0
+    for pattern in evidence_patterns:
+        if re.search(pattern, text_original, re.IGNORECASE):
+            evidence_pattern_hits += 1
+    
+    # Count entity matches (downweighted in single-doc mode)
+    entity_match_count = 0
+    if entity_terms:
+        for entity_term in entity_terms:
+            pattern = r'\b' + re.escape(entity_term.lower()) + r'\b'
+            if re.search(pattern, combined_text, re.IGNORECASE):
+                entity_match_count += 1
+    
+    # Scoring formula:
+    # score = 10*intent_match_count + 3*evidence_pattern_hits + entity_weight*entity_match_count
+    # Entity weight: 0.1 in single-doc mode, 0.5 in multi-doc mode
+    entity_weight = 0.1 if single_doc_mode else 0.5
+    
+    intent_score = 10 * intent_match_count
+    evidence_score = 3 * evidence_pattern_hits
+    entity_score = entity_weight * entity_match_count
+    
+    # Small bonus for longer chunks (up to cap of 5)
+    chunk_length = len(chunk.get("text", ""))
+    length_bonus = min(chunk_length / 1000, 5.0)  # Cap at 5
+    
+    total_score = intent_score + evidence_score + entity_score + length_bonus
+    has_evidence = evidence_pattern_hits > 0
+    
+    return total_score, intent_match_count, evidence_pattern_hits, entity_match_count, has_evidence
 
-    print(f"DEBUG: keywords={keywords}")
-    filtered = []
+
+def keyword_filter(chunks: List[Dict], intent_types: List[str], intent_synonyms: set,
+                   evidence_patterns: List[str], entity_terms: List[str], 
+                   single_doc_mode: bool) -> List[Dict]:
+    """
+    Filter and score chunks based on intent coverage and evidence patterns.
+    Returns chunks sorted by score (descending).
+    """
+    scored_chunks = []
+    
     for chunk in chunks:
+        score, intent_matches, evidence_hits, entity_matches, has_evidence = score_chunk(
+            chunk, intent_types, intent_synonyms, evidence_patterns, 
+            entity_terms, single_doc_mode
+        )
+        
+        # Only include chunks with at least one match
+        if intent_matches > 0 or evidence_hits > 0 or entity_matches > 0:
+            chunk_length = len(chunk.get("text", ""))
+            scored_chunks.append((
+                chunk, score, intent_matches, evidence_hits, 
+                entity_matches, has_evidence, chunk_length
+            ))
+    
+    # Sort by: score desc, intent_matches desc, evidence_hits desc, length desc
+    scored_chunks.sort(key=lambda x: (x[1], x[2], x[3], x[6]), reverse=True)
+    
+    if DEBUG and scored_chunks:
+        print(f"DEBUG: Top keyword matches (score, intent, evidence, entity, has_evidence, length):")
+        for i, (chunk, score, im, eh, em, he, length) in enumerate(scored_chunks[:3]):
+            section = chunk.get('metadata', {}).get('section', 'unknown')
+            print(f"  [{i+1}] {section}: score={score:.2f} (intent={im}, evidence={eh}, entity={em}, has_evidence={he}, len={length})")
+    
+    # Return just the chunks
+    return [chunk for chunk, _, _, _, _, _, _ in scored_chunks]
+
+
+def check_semantic_intent_coverage(semantic_chunks: List[Dict], intent_types: List[str],
+                                   intent_synonyms: set, evidence_patterns: List[str]) -> Tuple[bool, int, int]:
+    """
+    Check if semantic top-k has good intent coverage.
+    
+    Returns:
+        (has_good_coverage, intent_match_count, evidence_pattern_hits)
+    """
+    intent_match_count = 0
+    evidence_pattern_hits = 0
+    
+    for chunk in semantic_chunks:
         text_lower = chunk.get("text", "").lower()
+        text_original = chunk.get("text", "")
         metadata = chunk.get("metadata", {})
         metadata_str = " ".join(str(v).lower() for v in metadata.values())
+        combined_text = f"{text_lower} {metadata_str}"
         
-        # Count how many keywords match (prioritize chunks with more keyword matches)
-        keyword_matches = sum(1 for kw in keywords if kw in text_lower or kw in metadata_str)
+        # Count intent matches
+        for synonym in intent_synonyms:
+            pattern = r'\b' + re.escape(synonym.lower()) + r'\b'
+            if re.search(pattern, combined_text, re.IGNORECASE):
+                intent_match_count += 1
+                break  # Count once per chunk
         
-        # Only include chunks that match at least one keyword
-        if keyword_matches > 0:
-            filtered.append((chunk, keyword_matches))
+        # Count evidence pattern hits
+        for pattern in evidence_patterns:
+            if re.search(pattern, text_original, re.IGNORECASE):
+                evidence_pattern_hits += 1
+                break  # Count once per chunk
     
-    # Sort by number of keyword matches (descending) to prioritize better matches
-    filtered.sort(key=lambda x: x[1], reverse=True)
+    # Good coverage if: intent matches > 0 OR evidence hits > 0
+    has_good_coverage = intent_match_count > 0 or evidence_pattern_hits > 0
     
-    # Return just the chunks (without match counts)
-    return [chunk for chunk, _ in filtered]
+    return has_good_coverage, intent_match_count, evidence_pattern_hits
 
 
-def hybrid_retrieve(query: str, k: int = 5, persist_dir: str = "data/chroma_index") -> List[Dict]:
+def hybrid_retrieve(query: str, k: int = 5, persist_dir: str = "data/chroma_index", debug: bool = True) -> List[Dict]:
     """
-    Hybrid retrieval: semantic search + keyword filtering.
-    Uses unified ChromaDB client to ensure consistent access to finance_rag collection.
+    Generalized hybrid retrieval with intent-based scoring.
+    
+    Args:
+        query: User query
+        k: Number of chunks to return
+        persist_dir: ChromaDB persist directory
+        debug: Enable debug prints
+    
+    Returns:
+        List of chunk dicts with text, metadata, distance
     """
+    global DEBUG
+    DEBUG = debug
+    
     collection = get_collection(persist_dir)
     
-    # Use same embedding model as ingestion
+    # Detect single-doc mode (downweight entity terms)
+    single_doc = is_single_doc_mode(persist_dir)
+    if DEBUG:
+        print(f"DEBUG: Single-doc mode: {single_doc}")
+    
+    # Classify query intent
+    detected_intents, intent_confidence = classify_intent(query)
+    intent_synonyms = get_intent_synonyms(detected_intents) if detected_intents else set()
+    evidence_patterns = get_evidence_patterns(detected_intents) if detected_intents else []
+    entity_terms = extract_entity_terms(query)
+    
+    if DEBUG:
+        print(f"DEBUG: Detected intents: {detected_intents}, confidence: {intent_confidence:.2f}")
+        print(f"DEBUG: Entity terms: {entity_terms}")
+        print(f"DEBUG: Intent synonyms: {list(intent_synonyms)[:5]}...")  # Show first 5
+    
+    # Semantic retrieval first
     embedder = get_embedder()
     query_embedding = embedder.encode([query])[0].tolist()
     
-    # Semantic retrieval: get more candidates for recall
     semantic_results = collection.query(
         query_embeddings=[query_embedding],
         n_results=k * 2,  # Get more for recall
@@ -95,15 +225,32 @@ def hybrid_retrieve(query: str, k: int = 5, persist_dir: str = "data/chroma_inde
                 "distance": semantic_results["distances"][0][i] if semantic_results["distances"] and len(semantic_results["distances"][0]) > i else None
             })
     
-    # Check if top semantic result has poor match (high distance)
-    top_distance = semantic_chunks[0].get("distance") if semantic_chunks else None
-    use_keyword_fallback = top_distance and top_distance > 15.0
-
-    # Keyword filtering on semantic results
-    keyword_matches_semantic = keyword_filter(semantic_chunks, query)
-
-    # If semantic results are poor, do keyword search across ALL chunks
-    # (regardless of whether semantic keyword matches exist, since they might not be relevant)
+    # Check semantic intent coverage
+    semantic_has_coverage, semantic_intent_matches, semantic_evidence_hits = check_semantic_intent_coverage(
+        semantic_chunks[:k], detected_intents, intent_synonyms, evidence_patterns
+    )
+    
+    # Decide on fallback: use keyword search if intent confidence is high BUT semantic has poor coverage
+    use_keyword_fallback = False
+    if detected_intents and intent_confidence > 0.3:  # Intent detected with reasonable confidence
+        if not semantic_has_coverage or semantic_intent_matches == 0:
+            use_keyword_fallback = True
+    
+    if DEBUG:
+        print(f"DEBUG: Semantic coverage: has_coverage={semantic_has_coverage}, intent_matches={semantic_intent_matches}, evidence_hits={semantic_evidence_hits}")
+        print(f"DEBUG: Use keyword fallback: {use_keyword_fallback}")
+    
+    # Score semantic chunks
+    scored_semantic = []
+    for chunk in semantic_chunks:
+        score, im, eh, em, he = score_chunk(
+            chunk, detected_intents, intent_synonyms, evidence_patterns,
+            entity_terms, single_doc
+        )
+        if im > 0 or eh > 0 or em > 0:
+            scored_semantic.append((chunk, score, im, eh, em, he))
+    
+    # If fallback needed, do keyword search across all chunks
     if use_keyword_fallback:
         all_data = collection.get(include=["documents", "metadatas"])
         all_chunks = []
@@ -126,73 +273,41 @@ def hybrid_retrieve(query: str, k: int = 5, persist_dir: str = "data/chroma_inde
                 "distance": None
             })
         
-        # Filter all chunks by keywords
-        keyword_matches_full = keyword_filter(all_chunks, query)
+        # Filter and score all chunks
+        keyword_matches = keyword_filter(
+            all_chunks, detected_intents, intent_synonyms,
+            evidence_patterns, entity_terms, single_doc
+        )
         
-        # Debug output
-        print(f"DEBUG: use_keyword_fallback={use_keyword_fallback}, keyword_matches_full count={len(keyword_matches_full)}")
-        for i, km in enumerate(keyword_matches_full[:3]):
-            print(f"  Keyword match {i+1}: {km['metadata'].get('section', 'unknown')} - {km['text'][:100]}...")
+        # Filter out tiny chunks
+        keyword_matches = [c for c in keyword_matches if len(c.get('text', '')) >= MIN_CHUNK_CHARS]
         
-        # Use full DB keyword matches (they're more comprehensive)
-        keyword_matches = keyword_matches_full
+        if DEBUG:
+            print(f"DEBUG: Keyword fallback found {len(keyword_matches)} matches")
+        
+        # Use keyword matches (they're scored and sorted)
+        result_chunks = keyword_matches[:k]
     else:
-        # Use semantic keyword matches only
-        keyword_matches = keyword_matches_semantic
+        # Use semantic results (already scored)
+        scored_semantic.sort(key=lambda x: (x[1], x[2], x[3]), reverse=True)
+        result_chunks = [chunk for chunk, _, _, _, _, _ in scored_semantic[:k]]
     
-    # Combine with deduplication (by text content)
-    # If we have keyword matches from full DB search, prioritize them over poor semantic results
-    if use_keyword_fallback and len(keyword_matches) > 0:
-        # Prioritize keyword matches when semantic results are poor
-        unique_chunks = {}
-        # Add keyword matches first (they're more relevant)
-        for chunk in keyword_matches:
-            text = chunk.get("text", "")
-            if text not in unique_chunks:
-                unique_chunks[text] = chunk
-        
-        # Then add semantic results as fallback (only if we don't have enough keyword matches)
-        for chunk in semantic_chunks:
-            text = chunk.get("text", "")
-            if text not in unique_chunks and len(unique_chunks) < k:
-                unique_chunks[text] = chunk
-    else:
-        # Normal case: prioritize semantic results, add keyword matches as supplement
-        unique_chunks = {}
-        # Prioritize semantic results first
-        for chunk in semantic_chunks:
-            text = chunk.get("text", "")
-            if text not in unique_chunks:
-                unique_chunks[text] = chunk
-        
-        # Then add keyword matches
-        for chunk in keyword_matches:
-            text = chunk.get("text", "")
-            if text not in unique_chunks:
-                unique_chunks[text] = chunk
-    
-    # Return top-k
-    result_chunks = list(unique_chunks.values())[:k]
-
-    # In rag_pipeline/retriever/hybrid_retrieve.py
-
-    # Add after line 175 (after result_chunks is created, before debug output):
-
-    # Filter out tiny chunks (section headers, etc.) that don't provide useful content
-    # This aligns with confidence_gate.py's MIN_CONTEXT_CHARS requirement
-    MIN_CHUNK_CHARS = 200
+    # Final filtering: remove tiny chunks if we have substantial ones
     filtered_chunks = [c for c in result_chunks if len(c.get('text', '')) >= MIN_CHUNK_CHARS]
     
-    # Only use filtered chunks if we still have enough (at least 2 for confidence gate)
-    # Otherwise, keep original chunks to avoid over-filtering
-    if len(filtered_chunks) >= 2:
-        result_chunks = filtered_chunks[:k]  # Re-apply top-k limit
-    # else: keep original result_chunks (don't filter if it would leave too few)
-
-    print(f"DEBUG: Final result_chunks count={len(result_chunks)}")
-    total_chars = sum(len(c.get('text', '')) for c in result_chunks)
-    print(f"DEBUG: Total context chars={total_chars}")
-    for i, c in enumerate(result_chunks):
-        print(f"  Final chunk {i+1}: {c['metadata'].get('section', 'unknown')} ({len(c.get('text', ''))} chars)")
+    if len(filtered_chunks) >= 1:
+        result_chunks = filtered_chunks[:k]
+    else:
+        # Fallback: keep largest chunks if filtering removed everything
+        result_chunks = sorted(result_chunks, key=lambda c: len(c.get('text', '')), reverse=True)[:k]
+    
+    if DEBUG:
+        print(f"DEBUG: Final result_chunks count={len(result_chunks)}")
+        total_chars = sum(len(c.get('text', '')) for c in result_chunks)
+        print(f"DEBUG: Total context chars={total_chars}")
+        for i, c in enumerate(result_chunks):
+            section = c.get('metadata', {}).get('section', 'unknown')
+            length = len(c.get('text', ''))
+            print(f"  Final chunk {i+1}: {section} ({length} chars)")
     
     return result_chunks

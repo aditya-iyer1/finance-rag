@@ -76,16 +76,20 @@ def generate_answer_with_gate(query: str, chunks: List[Dict], model_name: str = 
     """
     from rag_pipeline.verifier.confidence_gate import compute_confidence
     from rag_pipeline.verifier.hallucination_guard import sentence_overlap
+    from rag_pipeline.retriever.intent_classifier import classify_intent
     
     # Pre-generation gate: check retrieval quality
     if len(chunks) == 0:
         return ABSTAIN_MESSAGE + " (no relevant chunks found)", True
     
+    # Classify intent for confidence gate
+    detected_intents, _ = classify_intent(query)
+    
     answer = generate_answer(query, chunks, model_name)
     
     # Post-generation gate: verification
     verification_passed = sentence_overlap(answer, chunks)
-    should_answer, reason = compute_confidence(chunks, verification_passed)
+    should_answer, reason = compute_confidence(chunks, verification_passed, intent_types=detected_intents if detected_intents else None)
     
     if not should_answer:
         return f"{ABSTAIN_MESSAGE} Reason: {reason}", True
