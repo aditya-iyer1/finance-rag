@@ -1,8 +1,10 @@
 # rag_pipeline/retriever/retrieve.py
 
+import logging
 from typing import List, Dict
 from sentence_transformers import SentenceTransformer
-from rag_pipeline.retriever.chroma_client import get_collection
+
+logger = logging.getLogger(__name__)
 
 # Embedding model must match embed_store.py for consistent retrieval
 EMBEDDING_MODEL_NAME = "sentence-transformers/paraphrase-MiniLM-L3-v2"
@@ -15,22 +17,15 @@ def get_embedder():
     global _embedder_cache
     if _embedder_cache is None:
         _embedder_cache = SentenceTransformer(EMBEDDING_MODEL_NAME)
-        print(f"🔍 Loaded embedding model: {EMBEDDING_MODEL_NAME}")
+        logger.info("Loaded embedding model: %s", EMBEDDING_MODEL_NAME)
     return _embedder_cache
-
-def load_chroma_collection(persist_dir: str = "data/chroma_index"):
-    """
-    Load ChromaDB collection using the unified client.
-    DEPRECATED: Use get_collection() from chroma_client.py directly.
-    Kept for backward compatibility.
-    """
-    return get_collection(persist_dir)
 
 
 def query_chunks(
     query: str,
     top_k: int = 5,
-    persist_dir: str = "data/chroma_index"
+    persist_dir: str = "data/chroma_index",
+    debug: bool = False
 ) -> List[Dict]:
     """
     Return top-k most relevant chunks for a given query.
@@ -42,11 +37,11 @@ def query_chunks(
     # Use hybrid retrieval which combines semantic and keyword matching
     from rag_pipeline.retriever.hybrid_retrieve import hybrid_retrieve
     
-    chunks = hybrid_retrieve(query, k=top_k, persist_dir=persist_dir)
+    chunks = hybrid_retrieve(query, k=top_k, persist_dir=persist_dir, debug=debug)
     
     if len(chunks) > 0:
-        print(f"✅ Retrieved {len(chunks)} relevant chunks (requested {top_k})")
+        logger.info("Retrieved %d relevant chunks (requested %d)", len(chunks), top_k)
     else:
-        print(f"⚠️ No results found for query: '{query}'")
+        logger.info("No results found for query: '%s'", query)
     
     return chunks

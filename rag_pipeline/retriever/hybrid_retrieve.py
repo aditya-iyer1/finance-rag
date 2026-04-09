@@ -5,21 +5,24 @@ Generalized hybrid retrieval with intent-based scoring and fallback.
 Works across many finance question types without brittle query-specific fixes.
 """
 
+import logging
+import re
 from typing import List, Dict, Tuple
+
 from sentence_transformers import SentenceTransformer
 from rag_pipeline.retriever.chroma_client import get_collection, is_single_doc_mode
 from rag_pipeline.retriever.retrieve import get_embedder
 from rag_pipeline.retriever.intent_classifier import (
     classify_intent, get_intent_synonyms, get_evidence_patterns, extract_entity_terms
 )
-import re
+
+logger = logging.getLogger(__name__)
 
 # Embedding model must match ingestion (same as retrieve.py)
 EMBEDDING_MODEL_NAME = "sentence-transformers/paraphrase-MiniLM-L3-v2"
 
 # Constants
 MIN_CHUNK_CHARS = 200
-DEBUG = True  # Set to False to disable debug prints
 
 
 def score_chunk(chunk: Dict, intent_types: List[str], intent_synonyms: set, 
@@ -103,11 +106,12 @@ def keyword_filter(chunks: List[Dict], intent_types: List[str], intent_synonyms:
     # Sort by: score desc, intent_matches desc, evidence_hits desc, length desc
     scored_chunks.sort(key=lambda x: (x[1], x[2], x[3], x[6]), reverse=True)
     
-    if DEBUG and scored_chunks:
-        print(f"DEBUG: Top keyword matches (score, intent, evidence, entity, has_evidence, length):")
+    if scored_chunks:
+        logger.debug("Top keyword matches (score, intent, evidence, entity, has_evidence, length):")
         for i, (chunk, score, im, eh, em, he, length) in enumerate(scored_chunks[:3]):
             section = chunk.get('metadata', {}).get('section', 'unknown')
-            print(f"  [{i+1}] {section}: score={score:.2f} (intent={im}, evidence={eh}, entity={em}, has_evidence={he}, len={length})")
+            logger.debug("  [%d] %s: score=%.2f (intent=%d, evidence=%d, entity=%d, has_evidence=%s, len=%d)",
+                         i+1, section, score, im, eh, em, he, length)
     
     # Return just the chunks
     return [chunk for chunk, _, _, _, _, _, _ in scored_chunks]
@@ -150,7 +154,7 @@ def check_semantic_intent_coverage(semantic_chunks: List[Dict], intent_types: Li
     return has_good_coverage, intent_match_count, evidence_pattern_hits
 
 
-def hybrid_retrieve(query: str, k: int = 5, persist_dir: str = "data/chroma_index", debug: bool = True) -> List[Dict]:
+def hybrid_retrieve(query: str, k: int = 5, persist_dir: str = "data/chroma_index", debug: bool = False) -> List[Dict]:
     """
     Generalized hybrid retrieval with intent-based scoring.
     
@@ -158,20 +162,31 @@ def hybrid_retrieve(query: str, k: int = 5, persist_dir: str = "data/chroma_inde
         query: User query
         k: Number of chunks to return
         persist_dir: ChromaDB persist directory
-        debug: Enable debug prints
+        debug: Enable debug-level logging for this call
     
     Returns:
         List of chunk dicts with text, metadata, distance
     """
-    global DEBUG
-    DEBUG = debug
+    parent_logger = logging.getLogger("rag_pipeline")
+    prev_parent_level = parent_logger.level
+    prev_level = logger.level
+    if debug:
+        parent_logger.setLevel(logging.DEBUG)
+        logger.setLevel(logging.DEBUG)
     
+    try:
+        return _hybrid_retrieve_impl(query, k, persist_dir, debug)
+    finally:
+        if debug:
+            parent_logger.setLevel(prev_parent_level)
+            logger.setLevel(prev_level)
+    
+def _hybrid_retrieve_impl(query: str, k: int, persist_dir: str, debug: bool) -> List[Dict]:
     collection = get_collection(persist_dir)
     
     # Detect single-doc mode (downweight entity terms)
     single_doc = is_single_doc_mode(persist_dir)
-    if DEBUG:
-        print(f"DEBUG: Single-doc mode: {single_doc}")
+    logger.debug("Single-doc mode: %s", single_doc)
     
     # Classify query intent
     detected_intents, intent_confidence = classify_intent(query)
@@ -179,10 +194,9 @@ def hybrid_retrieve(query: str, k: int = 5, persist_dir: str = "data/chroma_inde
     evidence_patterns = get_evidence_patterns(detected_intents) if detected_intents else []
     entity_terms = extract_entity_terms(query)
     
-    if DEBUG:
-        print(f"DEBUG: Detected intents: {detected_intents}, confidence: {intent_confidence:.2f}")
-        print(f"DEBUG: Entity terms: {entity_terms}")
-        print(f"DEBUG: Intent synonyms: {list(intent_synonyms)[:5]}...")  # Show first 5
+    logger.debug("Detected intents: %s, confidence: %.2f", detected_intents, intent_confidence)
+    logger.debug("Entity terms: %s", entity_terms)
+    logger.debug("Intent synonyms: %s...", list(intent_synonyms)[:5])
     
     # Semantic retrieval first
     embedder = get_embedder()
@@ -235,10 +249,14 @@ def hybrid_retrieve(query: str, k: int = 5, persist_dir: str = "data/chroma_inde
     if detected_intents and intent_confidence > 0.3:  # Intent detected with reasonable confidence
         if not semantic_has_coverage or semantic_intent_matches == 0:
             use_keyword_fallback = True
+        elif semantic_evidence_hits == 0 and len(evidence_patterns) > 0:
+            # Semantic results contain generic synonym matches but no specific evidence patterns.
+            # This means the results are tangentially related, not directly answering the query.
+            use_keyword_fallback = True
     
-    if DEBUG:
-        print(f"DEBUG: Semantic coverage: has_coverage={semantic_has_coverage}, intent_matches={semantic_intent_matches}, evidence_hits={semantic_evidence_hits}")
-        print(f"DEBUG: Use keyword fallback: {use_keyword_fallback}")
+    logger.debug("Semantic coverage: has_coverage=%s, intent_matches=%d, evidence_hits=%d",
+                 semantic_has_coverage, semantic_intent_matches, semantic_evidence_hits)
+    logger.debug("Use keyword fallback: %s", use_keyword_fallback)
     
     # Score semantic chunks
     scored_semantic = []
@@ -282,8 +300,7 @@ def hybrid_retrieve(query: str, k: int = 5, persist_dir: str = "data/chroma_inde
         # Filter out tiny chunks
         keyword_matches = [c for c in keyword_matches if len(c.get('text', '')) >= MIN_CHUNK_CHARS]
         
-        if DEBUG:
-            print(f"DEBUG: Keyword fallback found {len(keyword_matches)} matches")
+        logger.debug("Keyword fallback found %d matches", len(keyword_matches))
         
         # Use keyword matches (they're scored and sorted)
         result_chunks = keyword_matches[:k]
@@ -291,6 +308,15 @@ def hybrid_retrieve(query: str, k: int = 5, persist_dir: str = "data/chroma_inde
         # Use semantic results (already scored)
         scored_semantic.sort(key=lambda x: (x[1], x[2], x[3]), reverse=True)
         result_chunks = [chunk for chunk, _, _, _, _, _ in scored_semantic[:k]]
+        
+        # Backfill with remaining semantic chunks if we have fewer than k scored results
+        if len(result_chunks) < k:
+            scored_ids = {id(chunk) for chunk, _, _, _, _, _ in scored_semantic}
+            for chunk in semantic_chunks:
+                if len(result_chunks) >= k:
+                    break
+                if id(chunk) not in scored_ids:
+                    result_chunks.append(chunk)
     
     # Final filtering: remove tiny chunks if we have substantial ones
     filtered_chunks = [c for c in result_chunks if len(c.get('text', '')) >= MIN_CHUNK_CHARS]
@@ -301,13 +327,12 @@ def hybrid_retrieve(query: str, k: int = 5, persist_dir: str = "data/chroma_inde
         # Fallback: keep largest chunks if filtering removed everything
         result_chunks = sorted(result_chunks, key=lambda c: len(c.get('text', '')), reverse=True)[:k]
     
-    if DEBUG:
-        print(f"DEBUG: Final result_chunks count={len(result_chunks)}")
-        total_chars = sum(len(c.get('text', '')) for c in result_chunks)
-        print(f"DEBUG: Total context chars={total_chars}")
-        for i, c in enumerate(result_chunks):
-            section = c.get('metadata', {}).get('section', 'unknown')
-            length = len(c.get('text', ''))
-            print(f"  Final chunk {i+1}: {section} ({length} chars)")
+    logger.debug("Final result_chunks count=%d", len(result_chunks))
+    total_chars = sum(len(c.get('text', '')) for c in result_chunks)
+    logger.debug("Total context chars=%d", total_chars)
+    for i, c in enumerate(result_chunks):
+        section = c.get('metadata', {}).get('section', 'unknown')
+        length = len(c.get('text', ''))
+        logger.debug("  Final chunk %d: %s (%d chars)", i+1, section, length)
     
     return result_chunks

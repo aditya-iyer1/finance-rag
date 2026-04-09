@@ -1,13 +1,17 @@
+import logging
 from sentence_transformers import SentenceTransformer
 from typing import List, Dict
 
+logger = logging.getLogger(__name__)
+
 def embed_chunks(
     chunks: List[Dict],
-    model_name: str = "sentence-transformers/paraphrase-MiniLM-L3-v2"
+    model_name: str = "sentence-transformers/paraphrase-MiniLM-L3-v2",
+    show_progress: bool = False
 ) -> List[Dict]:
     model = SentenceTransformer(model_name)
     texts = [chunk["text"] for chunk in chunks]
-    embeddings = model.encode(texts, show_progress_bar=True)
+    embeddings = model.encode(texts, show_progress_bar=show_progress)
 
     for i, chunk in enumerate(chunks):
         chunk["embedding"] = embeddings[i].tolist()
@@ -15,13 +19,11 @@ def embed_chunks(
     return chunks
 
 
-def store_in_chroma(embedded_chunks, persist_dir="data/chroma_index"):
+def store_in_chroma(embedded_chunks, persist_dir="data/chroma_index", verbose=False):
     """
     Store chunks in ChromaDB using the unified client.
     This ensures embed_chunks_cli.py writes to the same index that query_chunks() reads from.
     """
-    print("📦 Storing in ChromaDB...")
-    
     # Use unified client to get or create collection (for writing)
     from rag_pipeline.retriever.chroma_client import get_client, COLLECTION_NAME
     client = get_client(persist_dir)
@@ -40,4 +42,5 @@ def store_in_chroma(embedded_chunks, persist_dir="data/chroma_index"):
         ids=ids
     )
 
-    print(f"✅ Stored {len(embedded_chunks)} chunks in ChromaDB (persistent storage at {persist_dir})")
+    if verbose:
+        logger.debug("Stored %d chunks in ChromaDB (persist: %s)", len(embedded_chunks), persist_dir)

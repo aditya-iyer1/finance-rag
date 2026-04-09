@@ -24,7 +24,7 @@ def extract_raw_text_from_pdf(path: str) -> str:
 	return text
 
 def split_into_sections(text: str) -> Dict[str, str]:
-    pattern = re.compile(r"(ITEM\s+\d+[A]?(?:\.\d+)?\.?\s+.+?)(?=\nITEM\s+\d+[A]?|\Z)", re.IGNORECASE | re.DOTALL)
+    pattern = re.compile(r"(ITEM\s+\d+[A]?(?:\.\d+)?\.?\s+.+?)(?=\nITEM\s+\d+[A]?|\Z)", re.DOTALL)
     matches = list(pattern.finditer(text))
     sections = {}
 

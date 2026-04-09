@@ -136,6 +136,7 @@ hallucination-resistant-finance-rag/
 │   ├── 02_chunking_test.ipynb.ipynb
 │   ├── 03_retrieval_test.ipynb
 │   └── 04_generation_test.ipynb  # Interactive QA interface
+│   └── notebook_init.py          # required to intialize notebooks in correct environment
 │
 ├── embed_chunks_cli.py           # CLI script: PDF → embeddings → ChromaDB
 ├── requirements.txt              # Python dependencies

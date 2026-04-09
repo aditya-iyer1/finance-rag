@@ -1,19 +1,22 @@
+import json
 import logging
 from langchain_openai.chat_models import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage
 from typing import List, Dict, Tuple
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("rag_pipeline")
+logger = logging.getLogger(__name__)
 
-def format_prompt(query: str, chunks: List[Dict]) -> str:
+def _build_context(chunks: List[Dict]) -> str:
     context_lines = []
     for i, c in enumerate(chunks):
         ref = f"[{i+1}]"
         section = c['metadata'].get('section', 'unknown')
         context_lines.append(f"{ref} [Section: {section}]\n{c['text']}")
-    
-    context = "\n\n".join(context_lines)
+    return "\n\n".join(context_lines)
+
+
+def format_prompt(query: str, chunks: List[Dict]) -> str:
+    context = _build_context(chunks)
     
     return f"""You are a financial analysis assistant.
 Answer the question using ONLY the numbered context below.
@@ -35,7 +38,7 @@ def generate_answer(query: str, chunks: List[Dict], model_name: str = "gpt-4o", 
     prompt = format_prompt(query, chunks)
 
     if dry_run:
-        print("DRY RUN - Prompt Only:\n" + prompt)
+        logger.info("DRY RUN - Prompt Only:\n%s", prompt)
         return prompt
         
         
@@ -57,7 +60,7 @@ def generate_answer(query: str, chunks: List[Dict], model_name: str = "gpt-4o", 
     return answer
 
 def log_used_chunks(query: str, chunks: List[Dict], answer: str):
-    logger.info(f"Query: {query}")
+    logger.info("Query: %s", query)
     for i, c in enumerate(chunks):
         metadata = c.get('metadata', {})
         doc_id = metadata.get('doc_id', 'unknown')
@@ -65,10 +68,30 @@ def log_used_chunks(query: str, chunks: List[Dict], answer: str):
         chunk_id = metadata.get('chunk_id', 'unknown')
         distance = c.get('distance')
         distance_str = f" (distance={distance:.4f})" if distance is not None else ""
-        logger.info(f"  [{i+1}] {doc_id}::{section}::chunk-{chunk_id}{distance_str}")
-    logger.info(f"Answer length: {len(answer)} chars")
+        logger.info("  [%d] %s::%s::chunk-%s%s", i+1, doc_id, section, chunk_id, distance_str)
+    logger.info("Answer length: %d chars", len(answer))
 
 ABSTAIN_MESSAGE = "I cannot confidently answer this question based on the available document context."
+
+def _format_structured_prompt(query: str, chunks: List[Dict]) -> str:
+    context = _build_context(chunks)
+    
+    return f"""You are a financial analysis assistant.
+Answer the question using ONLY the numbered context below.
+Cite sources using bracketed numbers like [1], [2].
+
+If the answer is partially present, respond with the relevant information and state where the context is incomplete.
+
+You MUST respond with a JSON object containing exactly two fields:
+- "is_answerable": boolean — true if the context contains relevant information to answer the question, false otherwise
+- "answer": string — your answer with citations if answerable, or a brief explanation of why the context is insufficient
+
+Context:
+{context}
+
+Question:
+{query}"""
+
 
 def generate_answer_with_gate(query: str, chunks: List[Dict], model_name: str = "gpt-4o") -> Tuple[str, bool]:
     """
@@ -85,7 +108,36 @@ def generate_answer_with_gate(query: str, chunks: List[Dict], model_name: str = 
     # Classify intent for confidence gate
     detected_intents, _ = classify_intent(query)
     
-    answer = generate_answer(query, chunks, model_name)
+    # Use structured JSON output for reliable abstention detection
+    prompt = _format_structured_prompt(query, chunks)
+    llm = ChatOpenAI(
+        model=model_name,
+        temperature=0,
+        model_kwargs={"response_format": {"type": "json_object"}}
+    )
+    
+    messages = [
+        SystemMessage(
+            content="You are a financial analyst trained to answer questions based ONLY on provided SEC filings. Always respond with valid JSON."
+        ),
+        HumanMessage(content=prompt)
+    ]
+    
+    response = llm.invoke(messages)
+    
+    # Parse structured response
+    try:
+        result = json.loads(response.content)
+        answer = result.get("answer", response.content)
+        is_answerable = result.get("is_answerable", True)
+    except (json.JSONDecodeError, AttributeError):
+        logger.warning("Failed to parse structured JSON from LLM response, falling back to raw content")
+        answer = response.content
+        is_answerable = True
+    
+    # LLM explicitly indicated it cannot answer
+    if not is_answerable:
+        return ABSTAIN_MESSAGE, True
     
     # Post-generation gate: verification
     verification_passed = sentence_overlap(answer, chunks)

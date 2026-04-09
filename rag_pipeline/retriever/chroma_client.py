@@ -5,9 +5,12 @@ All ChromaDB operations should use get_collection() from this module to ensure
 we're accessing the same backend and collection.
 """
 
+import logging
 import os
 from chromadb import PersistentClient
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 # Default persist directory (relative to project root)
 DEFAULT_PERSIST_DIR = "data/chroma_index"
@@ -40,7 +43,7 @@ def _resolve_persist_dir(persist_dir: str = DEFAULT_PERSIST_DIR) -> str:
 def get_client(persist_dir: str = DEFAULT_PERSIST_DIR):
     """
     Get or create a PersistentClient (cached for efficiency).
-    Uses the same backend configuration as load_chroma_collection().
+    Uses the same backend configuration across the pipeline.
     """
     global _client_cache, _persist_dir_cache
     
@@ -104,20 +107,20 @@ def debug_chroma(persist_dir: str = DEFAULT_PERSIST_DIR):
     client = get_client(persist_dir)
     collections = client.list_collections()
     
-    print("=" * 60)
-    print("ChromaDB Debug Info")
-    print("=" * 60)
-    print(f"Absolute persist directory: {resolved_dir}")
-    print(f"Collections found: {[c.name for c in collections]}")
-    print(f"Target collection: {COLLECTION_NAME}")
+    logger.debug("=" * 60)
+    logger.debug("ChromaDB Debug Info")
+    logger.debug("=" * 60)
+    logger.debug("Absolute persist directory: %s", resolved_dir)
+    logger.debug("Collections found: %s", [c.name for c in collections])
+    logger.debug("Target collection: %s", COLLECTION_NAME)
     
     if any(c.name == COLLECTION_NAME for c in collections):
-        print(f"✅ Collection '{COLLECTION_NAME}' exists")
+        logger.debug("Collection '%s' exists", COLLECTION_NAME)
         collection = get_collection(persist_dir, COLLECTION_NAME)
         count = collection.count()
-        print(f"   Chunk count: {count}")
-        print(f"   Single-doc mode: {is_single_doc_mode(persist_dir)}")
+        logger.debug("   Chunk count: %d", count)
+        logger.debug("   Single-doc mode: %s", is_single_doc_mode(persist_dir))
     else:
-        print(f"⚠️  Collection '{COLLECTION_NAME}' NOT FOUND")
-        print(f"   Available collections: {[c.name for c in collections]}")
-    print("=" * 60)
+        logger.debug("Collection '%s' NOT FOUND", COLLECTION_NAME)
+        logger.debug("   Available collections: %s", [c.name for c in collections])
+    logger.debug("=" * 60)

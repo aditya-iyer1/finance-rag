@@ -107,10 +107,14 @@ def classify_intent(query: str) -> Tuple[List[str], float]:
         if matches > 0:
             intent_scores[intent_type] = score
     
-    # Normalize confidence (simple: sum of scores / max possible)
-    total_score = sum(intent_scores.values())
-    max_possible = 10.0  # Rough upper bound
-    confidence = min(total_score / max_possible, 1.0) if total_score > 0 else 0.0
+    # Normalize confidence based on the top intent's score
+    # Using the best intent's score (not sum) avoids dilution from weak secondary matches
+    if intent_scores:
+        top_intent_score = max(intent_scores.values())
+        max_possible = 2.0  # Typical well-formed query matches 2-4 single-word synonyms
+        confidence = min(top_intent_score / max_possible, 1.0)
+    else:
+        confidence = 0.0
     
     # Return top 1-2 intents (sorted by score, descending)
     sorted_intents = sorted(intent_scores.items(), key=lambda x: x[1], reverse=True)
