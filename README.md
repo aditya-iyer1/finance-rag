@@ -13,7 +13,7 @@ This project implements a Retrieval-Augmented Generation (RAG) system designed t
 - **Intent-Based Hybrid Retrieval**: Combines semantic vector search with keyword fallback, using rule-based intent classification (HQ_LOCATION, INCORPORATION, BUSINESS_OVERVIEW, FINANCIALS_REVENUE, RISKS, AUDITOR) to prioritize relevant sections
 - **Single-Document Mode Awareness**: Automatically downweights entity terms when only one document exists, preventing entity matches from dominating ranking
 - **Evidence Pattern Matching**: Uses regex patterns to detect strong signals (e.g., "headquartered in Austin, Texas") for improved retrieval quality
-- **Logging & Observability**: Comprehensive debug output showing intent classification, retrieval scores, chunk metadata, and confidence decisions
+- **Logging & Observability**: Structured Python `logging` (no bare `print()`) with `debug=True` for intent classification, retrieval scores, chunk metadata, and confidence decisions
 - **Modular Pipeline**: Clean separation of concerns (parser → retriever → generator → verifier) for easy extension and testing
 
 ## System Architecture
@@ -82,14 +82,16 @@ This project implements a Retrieval-Augmented Generation (RAG) system designed t
 
 **Generation** (`rag_pipeline/llm/generator.py`):
 1. **Prompt Formatting**: Creates prompt with numbered context chunks and citation instructions
-2. **LLM Call**: GPT-4o with temperature=0 for deterministic answers
-3. **Logging**: Records query, used chunks (with metadata), and answer length
+2. **Structured JSON Output**: LLM returns `{"is_answerable": bool, "answer": str}` for reliable programmatic abstention detection
+3. **LLM Call**: GPT-4o with temperature=0 and `response_format: json_object` for deterministic, parseable answers
+4. **Logging**: Records query, used chunks (with metadata), and answer length via Python `logging` module
 
 **Verification** (`rag_pipeline/verifier/confidence_gate.py`, `rag_pipeline/verifier/hallucination_guard.py`):
 1. **Pre-generation Gate**: Checks if chunks retrieved (abstains if empty)
-2. **Post-generation Gate**: Validates chunk count, context size, intent evidence, and answer grounding
-3. **Grounding Check**: Sentence overlap verification to ensure answer is supported by retrieved chunks
-4. **Abstention**: Returns clear abstain message with reason if any check fails
+2. **LLM Abstention Detection**: Parses structured JSON `is_answerable` field from the generation response
+3. **Post-generation Gate**: Validates chunk count, context size, intent evidence, and answer grounding
+4. **Grounding Check (LLM-as-a-Judge)**: Uses `gpt-4o-mini` to verify factual entailment between the answer and retrieved chunks, catching subtle hallucinations (e.g., correct structure but wrong location/numbers) that lexical overlap would miss
+5. **Abstention**: Returns clear abstain message with reason if any check fails
 
 ## Behind the Scenes: Design Choices
 
@@ -97,7 +99,7 @@ This project implements a Retrieval-Augmented Generation (RAG) system designed t
 
 **Why Metadata?** Chunk-level metadata (doc_id, section, chunk_id) enables traceability: users can verify answers by checking source sections, and the system can log which chunks were used for debugging and evaluation.
 
-**How Grounding Verification Works:** After LLM generation, the system uses sentence overlap (via `difflib.SequenceMatcher`) to check if answer sentences are supported by retrieved chunks. Low overlap triggers abstention to prevent hallucination.
+**How Grounding Verification Works:** After LLM generation, the system uses an **LLM-as-a-Judge** approach (`gpt-4o-mini`) to verify that the answer is factually entailed by the retrieved chunks. The judge prompt explicitly handles coreference ("We"/"Our" in filings mapping to the company name in the answer) and checks for contradictions in locations, figures, and dates. If the judge determines the answer is not grounded, the system abstains. A word-overlap fallback is used if the judge API call fails.
 
 **Intent-Based Scoring:** Instead of relying solely on vector similarity (which can be noisy), the system scores chunks by intent keyword matches and evidence patterns. This prioritizes chunks that actually contain relevant information (e.g., ITEM 2 for HQ questions) over semantically similar but irrelevant chunks.
 
@@ -129,14 +131,15 @@ hallucination-resistant-finance-rag/
 │   │
 │   └── verifier/
 │       ├── confidence_gate.py    # Pre/post-generation confidence checks
-│       └── hallucination_guard.py # Sentence overlap grounding verification
+│       └── hallucination_guard.py # LLM-as-a-Judge grounding verification (gpt-4o-mini)
 │
 ├── notebooks/                     # Jupyter notebooks for testing
 │   ├── 01_pdf_section_parser.ipynb
-│   ├── 02_chunking_test.ipynb.ipynb
+│   ├── 02_chunking_test.ipynb
 │   ├── 03_retrieval_test.ipynb
-│   └── 04_generation_test.ipynb  # Interactive QA interface
-│   └── notebook_init.py          # required to intialize notebooks in correct environment
+│   ├── 04_generation_test.ipynb  # Interactive QA interface
+│   ├── 05_walkthrough.ipynb      # End-to-end walkthrough with edge case tests
+│   └── notebook_init.py          # Required to initialize notebooks in correct environment
 │
 ├── embed_chunks_cli.py           # CLI script: PDF → embeddings → ChromaDB
 ├── requirements.txt              # Python dependencies
@@ -159,9 +162,14 @@ pip install -r requirements.txt
 ### Indexing Documents
 
 ```bash
-# Index a PDF (stores embeddings in data/chroma_index/)
-python embed_chunks_cli.py data/raw-pdfs/your-filing.pdf
+# Index the default PDF (data/raw-pdfs/tesla-2024-10K.pdf → data/chroma_index/)
+python embed_chunks_cli.py
+
+# With verbose output (section list, metadata samples, progress bar)
+python embed_chunks_cli.py --verbose
 ```
+
+> **Note:** The PDF path is currently set in `embed_chunks_cli.py`. Edit the `pdf_path` variable to index a different filing.
 
 ### Querying
 
@@ -199,7 +207,7 @@ print(f"Abstained: {abstained}")
 
 - **Citations Present**: Answers include numbered citations `[1]`, `[2]` mapping to source sections
 - **Abstains When Missing**: System abstains gracefully when information is unavailable
-- **No Hallucination**: Answers are grounded in retrieved chunks (verified via sentence overlap)
+- **No Hallucination**: Answers are grounded in retrieved chunks (verified via LLM-as-a-Judge entailment check)
 - **Relevant Retrieval**: Top chunks come from appropriate sections (ITEM 2 for HQ, ITEM 1A for risks, etc.)
 - **Intent Classification**: System correctly identifies query intent (HQ_LOCATION, INCORPORATION, etc.)
 
@@ -217,14 +225,14 @@ include properties in North America, Europe, and Asia utilized for manufacturing
 warehousing, engineering, retail and service locations, and administrative offices [1].
 ```
 
-**System Logs:**
+**System Logs** (with `debug=True`):
 ```
-DEBUG: Detected intents: ['HQ_LOCATION'], confidence: 0.45
-DEBUG: Single-doc mode: True
-DEBUG: Semantic coverage: has_coverage=True, intent_matches=1, evidence_hits=1
-DEBUG: Final result_chunks count=1
-INFO: Query: Where is the company headquartered?
-INFO:   [1] tesla-2024-10K::ITEM 2. PROPERTIES::chunk-71 (distance=19.9896)
+rag_pipeline.retriever.hybrid_retrieve - DEBUG - Detected intents: ['HQ_LOCATION'], confidence: 0.45
+rag_pipeline.retriever.hybrid_retrieve - DEBUG - Single-doc mode: True
+rag_pipeline.retriever.hybrid_retrieve - DEBUG - Semantic coverage: has_coverage=True, intent_matches=1, evidence_hits=1
+rag_pipeline.retriever.hybrid_retrieve - DEBUG - Final result_chunks count=1
+rag_pipeline.llm.generator - INFO - Query: Where is the company headquartered?
+rag_pipeline.llm.generator - INFO -   [1] tesla-2024-10K::ITEM 2. PROPERTIES::chunk-71 (distance=19.9896)
 ```
 
 ## Limitations & Future Improvements
@@ -234,7 +242,7 @@ INFO:   [1] tesla-2024-10K::ITEM 2. PROPERTIES::chunk-71 (distance=19.9896)
 - **No Reranking**: Top-k retrieval without cross-encoder reranking can miss subtle relevance signals
 - **Single-Document Focus**: Optimized for single 10-K queries; multi-document scenarios may need permission/access control
 - **Rule-Based Intent**: Intent classification is rule-based; may miss nuanced queries or require manual synonym updates
-- **Basic Grounding Check**: Sentence overlap is a simple heuristic; more sophisticated verification (e.g., claim-level attribution) could improve accuracy
+- **LLM-as-a-Judge Cost**: Grounding verification uses a `gpt-4o-mini` call per answer, adding latency and cost; a local NLI model could reduce this
 - **No Frontend**: Core pipeline is implemented, but UI/frontend is work-in-progress
 
 **Planned Improvements:**
