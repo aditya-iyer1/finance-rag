@@ -2,23 +2,13 @@
 
 A production-oriented RAG pipeline for answering questions over SEC financial filings (10-Ks) with built-in safeguards against hallucination. The system uses intent-based hybrid retrieval, traceable citations, and confidence-based abstention to ensure answers are grounded in source documents.
 
-## Summary
+## Definitive Summary
 
-This project implements a Retrieval-Augmented Generation (RAG) system designed to answer questions over financial filings with high fidelity. Unlike naive RAG implementations that may hallucinate or provide ungrounded answers, this system includes multiple layers of verification: intent-based retrieval that prioritizes relevant sections, chunk-level metadata for traceability, post-generation grounding checks, and confidence-based abstention when information is missing or retrieval quality is poor. The architecture is modular, extensible, and designed to work across multiple question types (HQ location, incorporation, business overview, financials, risks, auditor) without query-specific hardcoding.
+### What it does
 
-## Key Features
+This project answers questions about SEC filings, such as 10-Ks, and tries hard not to make things up. It stores multiple filings in one index, but every query is explicitly scoped to one active document so retrieval and generation never mix companies. A minimal Streamlit app is included so you can index filings, choose the active one, ask a question, and inspect the retrieved context.
 
-- **Traceability & Citations**: Every answer includes numbered citations `[1]`, `[2]` mapping to specific document sections with metadata (doc_id, section, chunk_id)
-- **Confidence-Based Abstention**: System abstains with clear reasoning when retrieval quality is poor, context is insufficient, or verification fails
-- **Intent-Based Hybrid Retrieval**: Combines semantic vector search with keyword fallback, using rule-based intent classification (HQ_LOCATION, INCORPORATION, BUSINESS_OVERVIEW, FINANCIALS_REVENUE, RISKS, AUDITOR) to prioritize relevant sections
-- **Single-Document Mode Awareness**: Automatically downweights entity terms when only one document exists, preventing entity matches from dominating ranking
-- **Evidence Pattern Matching**: Uses regex patterns to detect strong signals (e.g., "headquartered in Austin, Texas") for improved retrieval quality
-- **Logging & Observability**: Structured Python `logging` (no bare `print()`) with `debug=True` for intent classification, retrieval scores, chunk metadata, and confidence decisions
-- **Modular Pipeline**: Clean separation of concerns (parser → retriever → generator → verifier) for easy extension and testing
-
-## System Architecture
-
-### Pipeline Flow
+### Architecture
 
 ```
 ┌─────────────────┐
@@ -42,7 +32,7 @@ This project implements a Retrieval-Augmented Generation (RAG) system designed t
 │  QUERY & RETRIEVAL                                      │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐ │
 │  │  Classify    │→ │   Semantic   │→ │   Keyword    │ │
-│  │   Intent     │  │    Search    │  │   Fallback  │ │
+│  │   Intent     │  │    Search    │  │   Fallback   │ │
 │  └──────────────┘  └──────────────┘  └──────────────┘ │
 │  (HQ_LOCATION,      (vector sim)      (if poor)        │
 │   INCORPORATION,                                        │
@@ -51,11 +41,11 @@ This project implements a Retrieval-Augmented Generation (RAG) system designed t
          │
          ▼
 ┌─────────────────────────────────────────────────────────┐
-│  GENERATION & VERIFICATION                             │
+│  GENERATION & VERIFICATION                              │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐ │
-│  │   Format     │→ │   LLM        │→ │  Grounding  │ │
-│  │   Prompt     │  │  Generate    │  │   Check     │ │
-│  │  (citations) │  │   Answer      │  │  + Gate     │ │
+│  │   Format     │→ │   LLM        │→ │  Grounding   │ │
+│  │   Prompt     │  │  Generate    │  │   Check      │ │
+│  │  (citations) │  │   Answer     │  │  + Gate      │ │
 │  └──────────────┘  └──────────────┘  └──────────────┘ │
 └─────────────────────────────────────────────────────────┘
          │
@@ -63,6 +53,96 @@ This project implements a Retrieval-Augmented Generation (RAG) system designed t
     Final Answer
     (with citations or abstain)
 ```
+
+### Key design decisions with tradeoffs
+
+**Why Hybrid Retrieval?** Pure semantic search can miss relevant chunks when embeddings do not capture domain-specific relationships, such as "headquartered" versus "based." Keyword fallback improves recall, but it adds some extra logic and makes ranking behavior less uniform than a pure vector-only pipeline.
+
+**Why Metadata?** Chunk-level metadata (`doc_id`, `section`, `chunk_id`) makes answers traceable and debuggable. The tradeoff is a little more ingestion complexity and the need to keep metadata consistent across parsing, storage, retrieval, logging, and UI display.
+
+**Why LLM-as-Judge for Grounding?** A second model pass can catch errors that simple word overlap misses, such as wrong locations, wrong figures, or confident paraphrases that are not actually supported by the source text. The tradeoff is added latency and cost, plus a dependency on another model call; this repo keeps a word-overlap fallback so the system still degrades gracefully if the judge fails.
+
+**Why Structured JSON for Abstention?** The answer-generation step returns structured JSON with an `is_answerable` flag and an `answer` field, which makes abstention handling more reliable than string-matching free-form prose. The tradeoff is tighter coupling to model output format and slightly more prompt complexity, but it is much easier to reason about programmatically.
+
+### How to run
+
+**1. Setup**
+
+```bash
+python -m venv rag
+source rag/bin/activate  # On Windows: rag\Scripts\activate
+pip install -r requirements.txt
+```
+
+Create a `.env` file in the project root:
+
+```bash
+OPENAI_API_KEY=your_key_here
+```
+
+**2. Index a filing**
+
+```bash
+python embed_chunks_cli.py
+```
+
+The CLI scans `data/raw-pdfs/`, lets you choose a PDF, and writes its chunks to ChromaDB. Multiple filings can live in the same index at once. If you re-index a filing that is already present, only that filing's chunks are replaced.
+
+**3. Query from Python or validation scripts**
+
+```python
+from rag_pipeline.retriever.retrieve import query_chunks
+from rag_pipeline.llm.generator import generate_answer_with_gate
+
+chunks = query_chunks("Where is the company headquartered?", top_k=5, active_doc_id="tesla-2024-10K")
+answer, abstained = generate_answer_with_gate("Where is the company headquartered?", chunks)
+print(answer, abstained)
+```
+
+Or run the bundled validation matrices:
+
+```bash
+python run_validation.py
+python run_validation_jpmc.py
+```
+
+**4. Query from Streamlit**
+
+```bash
+streamlit run app.py
+```
+
+The Streamlit UI shows the available raw PDFs, lets you choose the active indexed filing, and shows the answer with citations plus a collapsible retrieved-context panel for transparency.
+
+### Limitations & what I'd do next
+
+**Current limitations**
+
+- The embedding model is lightweight and general-purpose, not finance-specific.
+- Retrieval does not yet use a reranker, so the top-k set can still include near-misses.
+- Multiple filings can be stored together, but every query still requires one active document scope.
+- Intent classification is rule-based, so new query styles may require synonym updates.
+- LLM-based answering and grounding checks add latency and cost.
+
+**What I’d do next**
+
+- Add cross-encoder reranking before generation.
+- Add caching and cost/latency instrumentation around both the answer model and the grounding judge.
+- Expand evaluation from test matrices to finer-grained citation and claim-level checks.
+- Add stronger document-level permissions and document routing beyond the current active-doc filter.
+- Upgrade embeddings or compare domain-specific alternatives for finance-heavy queries.
+
+## Key Features
+
+- **Traceability & Citations**: Every answer includes numbered citations `[1]`, `[2]` mapping to specific document sections with metadata (doc_id, section, chunk_id)
+- **Confidence-Based Abstention**: System abstains with clear reasoning when retrieval quality is poor, context is insufficient, or verification fails
+- **Intent-Based Hybrid Retrieval**: Combines semantic vector search with keyword fallback, using rule-based intent classification (HQ_LOCATION, INCORPORATION, BUSINESS_OVERVIEW, FINANCIALS_REVENUE, RISKS, AUDITOR) to prioritize relevant sections
+- **Single-Document Mode Awareness**: Automatically downweights entity terms when only one document exists, preventing entity matches from dominating ranking
+- **Evidence Pattern Matching**: Uses regex patterns to detect strong signals (e.g., "headquartered in Austin, Texas") for improved retrieval quality
+- **Logging & Observability**: Structured Python `logging` (no bare `print()`) with `debug=True` for intent classification, retrieval scores, chunk metadata, and confidence decisions
+- **Modular Pipeline**: Clean separation of concerns (parser → retriever → generator → verifier) for easy extension and testing
+
+## System Architecture
 
 ### Core Modules
 
@@ -90,7 +170,7 @@ This project implements a Retrieval-Augmented Generation (RAG) system designed t
 1. **Pre-generation Gate**: Checks if chunks retrieved (abstains if empty)
 2. **LLM Abstention Detection**: Parses structured JSON `is_answerable` field from the generation response
 3. **Post-generation Gate**: Validates chunk count, context size, intent evidence, and answer grounding
-4. **Grounding Check (LLM-as-a-Judge)**: Uses `gpt-4o-mini` to verify factual entailment between the answer and retrieved chunks, catching subtle hallucinations (e.g., correct structure but wrong location/numbers) that lexical overlap would miss
+4. **Grounding Check (LLM-as-a-Judge)**: Uses `gpt-4o-mini` to verify factual entailment between the answer and retrieved chunks, with a word-overlap fallback if the judge call fails
 5. **Abstention**: Returns clear abstain message with reason if any check fails
 
 ## Behind the Scenes: Design Choices
@@ -99,7 +179,9 @@ This project implements a Retrieval-Augmented Generation (RAG) system designed t
 
 **Why Metadata?** Chunk-level metadata (doc_id, section, chunk_id) enables traceability: users can verify answers by checking source sections, and the system can log which chunks were used for debugging and evaluation.
 
-**How Grounding Verification Works:** After LLM generation, the system uses an **LLM-as-a-Judge** approach (`gpt-4o-mini`) to verify that the answer is factually entailed by the retrieved chunks. The judge prompt explicitly handles coreference ("We"/"Our" in filings mapping to the company name in the answer) and checks for contradictions in locations, figures, and dates. If the judge determines the answer is not grounded, the system abstains. A word-overlap fallback is used if the judge API call fails.
+**Why LLM-as-a-Judge for Grounding?** After LLM generation, the system uses a second model pass (`gpt-4o-mini`) to verify that the answer is factually entailed by the retrieved chunks. This catches subtle grounding failures that simple lexical checks can miss, but it introduces extra latency and cost. If the judge call fails, the system falls back to a basic word-overlap check.
+
+**Why Structured JSON for Abstention?** The generation prompt requires the model to return `{"is_answerable": bool, "answer": str}` so the application can distinguish answerable versus unanswerable cases without fragile string matching. This improves reliability, but it also means the generation step depends on consistent structured output from the model.
 
 **Intent-Based Scoring:** Instead of relying solely on vector similarity (which can be noisy), the system scores chunks by intent keyword matches and evidence patterns. This prioritizes chunks that actually contain relevant information (e.g., ITEM 2 for HQ questions) over semantically similar but irrelevant chunks.
 
@@ -141,7 +223,10 @@ hallucination-resistant-finance-rag/
 │   ├── 05_walkthrough.ipynb      # End-to-end walkthrough with edge case tests
 │   └── notebook_init.py          # Required to initialize notebooks in correct environment
 │
+├── app.py                        # Minimal Streamlit frontend
 ├── embed_chunks_cli.py           # CLI script: PDF → embeddings → ChromaDB
+├── run_validation.py             # Validation matrix for Tesla-focused checks
+├── run_validation_jpmc.py        # Validation matrix for JPMorgan Chase-focused checks
 ├── requirements.txt              # Python dependencies
 └── README.md                     # This file
 ```
@@ -159,6 +244,12 @@ source rag/bin/activate  # On Windows: rag\Scripts\activate
 pip install -r requirements.txt
 ```
 
+Create a `.env` file in the project root with your OpenAI key:
+
+```bash
+OPENAI_API_KEY=your_key_here
+```
+
 ### Indexing Documents
 
 ```bash
@@ -174,12 +265,19 @@ The CLI is interactive:
 1. It scans `data/raw-pdfs/` for available 10-K PDFs.
 2. It shows a numbered menu so you can choose which filing to index.
 3. It parses the selected PDF into ITEM sections, chunks the text, embeds those chunks, and stores them in ChromaDB.
-4. If the current index already contains a different document, it prompts before clearing and replacing that index.
-5. If the same document is already indexed, it asks whether you want to re-index it.
+4. If the selected document is already indexed, it asks whether you want to re-index just that document.
+5. Existing chunks for other indexed documents are left untouched.
 
-This means the workflow after running `embed_chunks_cli.py` is now file-selection driven rather than hardcoded to a single source document. The query pipeline still targets one indexed filing at a time, so switching from Tesla to JPMorgan Chase (or back) is done by re-running the CLI and selecting the other PDF.
+This means the workflow after running `embed_chunks_cli.py` is file-selection driven rather than hardcoded to a single source document. You can keep Tesla and JPMorgan Chase in the same index, then switch query targets by selecting a different active document in the UI or by passing `active_doc_id` in code.
 
 ### Querying
+
+**Option 0: Streamlit frontend**
+```bash
+streamlit run app.py
+```
+
+The app loads `OPENAI_API_KEY` from `.env`, shows the available PDFs in `data/raw-pdfs/`, lets you select the active indexed filing, and lets you ask one question at a time while inspecting retrieved chunk metadata in the sidebar.
 
 **Option 1: Jupyter Notebook** (recommended for testing)
 ```bash
@@ -191,7 +289,7 @@ jupyter notebook notebooks/04_generation_test.ipynb
 from rag_pipeline.retriever.retrieve import query_chunks
 from rag_pipeline.llm.generator import generate_answer_with_gate
 
-chunks = query_chunks("Where is the company headquartered?", top_k=5)
+chunks = query_chunks("Where is the company headquartered?", top_k=5, active_doc_id="jpmc-10k-2025")
 answer, abstained = generate_answer_with_gate("Where is the company headquartered?", chunks)
 print(f"Answer: {answer}")
 print(f"Abstained: {abstained}")
@@ -217,7 +315,7 @@ To test against a specific filing:
 
 1. Run `python embed_chunks_cli.py`.
 2. Select the Tesla or JPMorgan Chase 10-K from `data/raw-pdfs/`.
-3. Let the CLI replace the current index if prompted.
+3. If that filing is already indexed, let the CLI replace only that filing's chunks if prompted.
 4. Run the matching validation script for that indexed document.
 
 The Tesla matrix checks Tesla-specific known-answer and abstention cases. The JPMorgan Chase matrix does the same for JPMC, including questions like headquarters, business overview, auditor, risk factors, and incorporation, plus out-of-scope prompts that should abstain.
@@ -273,17 +371,18 @@ rag_pipeline.llm.generator - INFO -   [1] tesla-2024-10K::ITEM 2. PROPERTIES::ch
 - **No Reranking**: Top-k retrieval without cross-encoder reranking can miss subtle relevance signals
 - **Single-Document Focus**: Optimized for single 10-K queries; multi-document scenarios may need permission/access control
 - **Rule-Based Intent**: Intent classification is rule-based; may miss nuanced queries or require manual synonym updates
+- **Typo Sensitivity**: Queries with significant typos may cause abstention since both the embedding model and keyword matcher expect reasonable spelling
 - **LLM-as-a-Judge Cost**: Grounding verification uses a `gpt-4o-mini` call per answer, adding latency and cost; a local NLI model could reduce this
-- **No Frontend**: Core pipeline is implemented, but UI/frontend is work-in-progress
+- **Frontend Scope Is Minimal**: The Streamlit app is intentionally narrow and does not yet support indexing, multi-document workflows, or richer citation browsing
 
 **Planned Improvements:**
 - **Reranker Integration**: Add cross-encoder reranking (e.g., `ms-marco-MiniLM`) to refine top-k results
 - **Better Evaluators**: Implement claim-level attribution, fact-checking against source, and automated evaluation metrics
 - **Multi-Document Support**: Add document-level permissions, filtering, and multi-doc query routing
 - **Cost Control**: Add caching for repeated queries, token usage tracking, and cost-aware model selection
-- **UI/Frontend**: Build Streamlit interface for interactive QA with citation visualization
+- **UI/Frontend**: Expand the Streamlit app to support indexing actions, richer source inspection, and better document switching
 - **Domain-Specific Embeddings**: Fine-tune or use financial-domain embeddings (e.g., FinBERT) for better semantic understanding
 
 ## Status
 
-This is a **framework/project scaffold** with a fully implemented core pipeline. The ingestion, retrieval, generation, and verification modules are production-ready, but the frontend UI is work-in-progress. The system is designed to be extensible: new intent types can be added to `intent_classifier.py`, and the modular architecture supports easy integration of rerankers, evaluators, and UI components.
+This project now includes a fully working core pipeline plus a minimal Streamlit entrypoint for interactive querying. The system is still intentionally narrow in scope, but the ingestion, retrieval, generation, verification, validation scripts, and frontend are all wired together end to end. The modular architecture supports future upgrades such as rerankers, multi-document support, richer evaluation, and a more capable UI.

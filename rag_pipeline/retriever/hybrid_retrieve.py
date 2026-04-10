@@ -7,10 +7,10 @@ Works across many finance question types without brittle query-specific fixes.
 
 import logging
 import re
-from typing import List, Dict, Tuple
+from typing import List, Dict, Optional, Tuple
 
 from sentence_transformers import SentenceTransformer
-from rag_pipeline.retriever.chroma_client import get_collection, is_single_doc_mode
+from rag_pipeline.retriever.chroma_client import get_collection
 from rag_pipeline.retriever.retrieve import get_embedder
 from rag_pipeline.retriever.intent_classifier import (
     classify_intent, get_intent_synonyms, get_evidence_patterns, extract_entity_terms
@@ -154,7 +154,13 @@ def check_semantic_intent_coverage(semantic_chunks: List[Dict], intent_types: Li
     return has_good_coverage, intent_match_count, evidence_pattern_hits
 
 
-def hybrid_retrieve(query: str, k: int = 5, persist_dir: str = "data/chroma_index", debug: bool = False) -> List[Dict]:
+def hybrid_retrieve(
+    query: str,
+    k: int = 5,
+    persist_dir: str = "data/chroma_index",
+    debug: bool = False,
+    active_doc_id: Optional[str] = None,
+) -> List[Dict]:
     """
     Generalized hybrid retrieval with intent-based scoring.
     
@@ -175,18 +181,25 @@ def hybrid_retrieve(query: str, k: int = 5, persist_dir: str = "data/chroma_inde
         logger.setLevel(logging.DEBUG)
     
     try:
-        return _hybrid_retrieve_impl(query, k, persist_dir, debug)
+        return _hybrid_retrieve_impl(query, k, persist_dir, debug, active_doc_id)
     finally:
         if debug:
             parent_logger.setLevel(prev_parent_level)
             logger.setLevel(prev_level)
     
-def _hybrid_retrieve_impl(query: str, k: int, persist_dir: str, debug: bool) -> List[Dict]:
+def _hybrid_retrieve_impl(
+    query: str,
+    k: int,
+    persist_dir: str,
+    debug: bool,
+    active_doc_id: Optional[str],
+) -> List[Dict]:
     collection = get_collection(persist_dir)
-    
-    # Detect single-doc mode (downweight entity terms)
-    single_doc = is_single_doc_mode(persist_dir)
-    logger.debug("Single-doc mode: %s", single_doc)
+    where_filter = {"doc_id": active_doc_id} if active_doc_id else None
+
+    # Querying is always scoped to one active document.
+    single_doc = True
+    logger.debug("Active document scope: %s", active_doc_id)
     
     # Classify query intent
     detected_intents, intent_confidence = classify_intent(query)
@@ -202,11 +215,15 @@ def _hybrid_retrieve_impl(query: str, k: int, persist_dir: str, debug: bool) -> 
     embedder = get_embedder()
     query_embedding = embedder.encode([query])[0].tolist()
     
-    semantic_results = collection.query(
+    semantic_query_kwargs = dict(
         query_embeddings=[query_embedding],
         n_results=k * 2,  # Get more for recall
-        include=["documents", "metadatas", "distances"]
+        include=["documents", "metadatas", "distances"],
     )
+    if where_filter:
+        semantic_query_kwargs["where"] = where_filter
+
+    semantic_results = collection.query(**semantic_query_kwargs)
     
     # Handle empty results
     if (
@@ -270,7 +287,10 @@ def _hybrid_retrieve_impl(query: str, k: int, persist_dir: str, debug: bool) -> 
     
     # If fallback needed, do keyword search across all chunks
     if use_keyword_fallback:
-        all_data = collection.get(include=["documents", "metadatas"])
+        get_kwargs = {"include": ["documents", "metadatas"]}
+        if where_filter:
+            get_kwargs["where"] = where_filter
+        all_data = collection.get(**get_kwargs)
         all_chunks = []
         for i, doc in enumerate(all_data["documents"]):
             metadata = all_data["metadatas"][i] if all_data["metadatas"] else {}

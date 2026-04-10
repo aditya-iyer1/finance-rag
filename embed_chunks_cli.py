@@ -7,7 +7,9 @@ from rag_pipeline.parser.pdf_loader import parse_pdf_sections
 from rag_pipeline.parser.chunker import chunk_all_sections
 from rag_pipeline.retriever.embed_store import embed_chunks, store_in_chroma
 from rag_pipeline.retriever.chroma_client import (
-    COLLECTION_NAME, DEFAULT_PERSIST_DIR, get_client, get_collection,
+    DEFAULT_PERSIST_DIR,
+    delete_doc_id,
+    list_indexed_doc_ids,
 )
 
 PDF_DIR = "data/raw-pdfs"
@@ -23,29 +25,9 @@ def find_pdfs():
         if f.lower().endswith(".pdf")
     ]
 
-
 def get_indexed_doc_ids():
-    """Return the set of doc_ids currently in the ChromaDB index, or empty set."""
-    try:
-        collection = get_collection(DEFAULT_PERSIST_DIR)
-        all_data = collection.get(include=["metadatas"])
-        doc_ids = set()
-        for metadata in all_data.get("metadatas", []):
-            if isinstance(metadata, dict) and "doc_id" in metadata:
-                doc_ids.add(metadata["doc_id"])
-        return doc_ids
-    except Exception:
-        return set()
-
-
-def clear_index():
-    """Delete the ChromaDB collection via the API (avoids stale SQLite handles)."""
-    try:
-        client = get_client(DEFAULT_PERSIST_DIR)
-        client.delete_collection(COLLECTION_NAME)
-        print(f"  Cleared collection '{COLLECTION_NAME}'")
-    except Exception:
-        pass
+    """Backwards-compatible wrapper returning indexed doc_ids as a set."""
+    return set(list_indexed_doc_ids(DEFAULT_PERSIST_DIR))
 
 
 def select_pdf(pdfs):
@@ -90,21 +72,25 @@ def main():
     if existing_ids:
         if doc_id in existing_ids and len(existing_ids) == 1:
             print(f"\n  Index already contains {doc_id}.")
-            answer = input("  Re-index this document? This will clear the existing index. (y/N): ").strip().lower()
+            answer = input("  Re-index this document? This will replace only this document's stored chunks. (y/N): ").strip().lower()
             if answer != "y":
                 print("  Skipped.")
                 return
-            clear_index()
+            deleted = delete_doc_id(doc_id, DEFAULT_PERSIST_DIR)
+            print(f"  Removed {deleted} existing chunks for {doc_id}")
+        elif doc_id in existing_ids:
+            print(f"\n  Index already contains {doc_id} alongside: {', '.join(sorted(existing_ids - {doc_id}))}")
+            answer = input("  Re-index this document? This will replace only this document's stored chunks. (y/N): ").strip().lower()
+            if answer != "y":
+                print("  Skipped.")
+                return
+            deleted = delete_doc_id(doc_id, DEFAULT_PERSIST_DIR)
+            print(f"  Removed {deleted} existing chunks for {doc_id}")
         else:
             other_docs = ", ".join(sorted(existing_ids))
             print(f"\n  Index currently contains: {other_docs}")
-            print(f"  Indexing {doc_id} will replace the existing index.")
-            print("  (The query pipeline targets one document at a time.)")
-            answer = input("  Continue? (y/N): ").strip().lower()
-            if answer != "y":
-                print("  Cancelled.")
-                return
-            clear_index()
+            print(f"  Indexing {doc_id} will add it to the shared index.")
+            print("  Queries remain scoped to one active document at a time.")
 
     # --- Parse ---
     print(f"\nParsing {pdf_name}...", end=" ", flush=True)
@@ -145,11 +131,13 @@ def main():
     store_in_chroma(embedded_chunks, verbose=verbose)
     print(f"{len(embedded_chunks)} chunks indexed")
 
-    print(f"\nDone. Index now contains: {doc_id}")
+    final_ids = sorted(get_indexed_doc_ids())
+    print(f"\nDone. Indexed document: {doc_id}")
+    print(f"Available indexed documents: {', '.join(final_ids)}")
 
     if verbose:
-        print("\nTo switch documents, re-run this script and select a different PDF.")
-        print("The existing index will be cleared before indexing the new document.")
+        print("\nTo add or refresh another document, re-run this script and select a PDF.")
+        print("Queries should always specify the active document they target.")
 
 
 if __name__ == "__main__":

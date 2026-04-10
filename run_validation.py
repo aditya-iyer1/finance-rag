@@ -19,6 +19,7 @@ from typing import List, Tuple
 from dotenv import load_dotenv
 load_dotenv()
 
+from rag_pipeline.retriever.chroma_client import resolve_active_doc_id
 from rag_pipeline.retriever.retrieve import query_chunks
 from rag_pipeline.llm.generator import generate_answer_with_gate
 
@@ -55,6 +56,8 @@ CATEGORY_C: List[str] = [
     "x" * 250,  # very long query (250 chars)
 ]
 
+DEFAULT_DOC_ID = "tesla-2024-10K"
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -71,9 +74,9 @@ def _truncate(text: str, width: int) -> str:
     return text[: width - 1] + "\u2026"
 
 
-def _run_query(query: str, debug: bool) -> Tuple[str, bool]:
+def _run_query(query: str, debug: bool, active_doc_id: str) -> Tuple[str, bool]:
     """Run a single query through retrieve → generate_answer_with_gate."""
-    chunks = query_chunks(query, top_k=5, debug=debug)
+    chunks = query_chunks(query, top_k=5, debug=debug, active_doc_id=active_doc_id)
     answer, abstained = generate_answer_with_gate(query, chunks)
     return answer, abstained
 
@@ -81,7 +84,7 @@ def _run_query(query: str, debug: bool) -> Tuple[str, bool]:
 # Runner
 # ---------------------------------------------------------------------------
 
-def run_tests(debug: bool, use_color: bool) -> int:
+def run_tests(debug: bool, use_color: bool, active_doc_id: str) -> int:
     """Execute all test categories and return the count of failures."""
 
     GREEN = "\033[92m" if use_color else ""
@@ -105,6 +108,7 @@ def run_tests(debug: bool, use_color: bool) -> int:
     print()
     print(f"{BOLD}RAG Pipeline Validation{RESET}")
     print(f"{'=' * 40}")
+    print(f"Active document: {active_doc_id}")
     print()
     print(sep)
     print(f"| {'Cat':<{COL_CAT}} | {'Result':<{COL_STATUS}} | {'Query':<{COL_QUERY}} | {'Detail':<{COL_DETAIL}} |")
@@ -117,7 +121,7 @@ def run_tests(debug: bool, use_color: bool) -> int:
     for query, signals in CATEGORY_A:
         total += 1
         try:
-            answer, abstained = _run_query(query, debug)
+            answer, abstained = _run_query(query, debug, active_doc_id)
             if abstained:
                 status = f"{RED}FAIL{RESET}"
                 detail = "Abstained (expected an answer)"
@@ -144,7 +148,7 @@ def run_tests(debug: bool, use_color: bool) -> int:
     for query in CATEGORY_B:
         total += 1
         try:
-            answer, abstained = _run_query(query, debug)
+            answer, abstained = _run_query(query, debug, active_doc_id)
             if abstained:
                 status = f"{GREEN}PASS{RESET}"
                 detail = "Correctly abstained"
@@ -170,7 +174,7 @@ def run_tests(debug: bool, use_color: bool) -> int:
         if len(query) > 50:
             display_query = f"(long query, {len(query)} chars)"
         try:
-            answer, abstained = _run_query(query, debug)
+            answer, abstained = _run_query(query, debug, active_doc_id)
             status = f"{GREEN}PASS{RESET}"
             detail = "Abstained" if abstained else f"Answered ({len(answer)} chars)"
         except Exception as exc:
@@ -201,12 +205,14 @@ def main():
     parser = argparse.ArgumentParser(description="RAG pipeline validation test matrix")
     parser.add_argument("--debug", action="store_true", help="Enable retrieval debug logging")
     parser.add_argument("--no-color", action="store_true", help="Disable ANSI color codes")
+    parser.add_argument("--doc-id", default=DEFAULT_DOC_ID, help="Indexed document to query")
     args = parser.parse_args()
 
     log_level = logging.DEBUG if args.debug else logging.WARNING
     logging.basicConfig(level=log_level, format="%(name)s - %(levelname)s - %(message)s")
 
-    failures = run_tests(debug=args.debug, use_color=not args.no_color)
+    active_doc_id = resolve_active_doc_id(args.doc_id)
+    failures = run_tests(debug=args.debug, use_color=not args.no_color, active_doc_id=active_doc_id)
     sys.exit(1 if failures > 0 else 0)
 
 
