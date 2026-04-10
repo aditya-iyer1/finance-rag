@@ -64,6 +64,8 @@ This project answers questions about SEC filings, such as 10-Ks, and tries hard 
 
 **Why Structured JSON for Abstention?** The answer-generation step returns structured JSON with an `is_answerable` flag and an `answer` field, which makes abstention handling more reliable than string-matching free-form prose. The tradeoff is tighter coupling to model output format and slightly more prompt complexity, but it is much easier to reason about programmatically.
 
+**Why Active-Document Scoping?** Multiple filings can be stored in one shared index, but every query is filtered to one explicit `active_doc_id`. This avoids cross-company retrieval and mixed citations. The tradeoff is that once more than one filing is indexed, callers must specify which filing they want to query.
+
 ### How to run
 
 **1. Setup**
@@ -86,7 +88,7 @@ OPENAI_API_KEY=your_key_here
 python embed_chunks_cli.py
 ```
 
-The CLI scans `data/raw-pdfs/`, lets you choose a PDF, and writes its chunks to ChromaDB. Multiple filings can live in the same index at once. If you re-index a filing that is already present, only that filing's chunks are replaced.
+The CLI scans `data/raw-pdfs/`, lets you choose a PDF, and writes its chunks to ChromaDB. Multiple filings can live in the same index at once. In normal use, indexing is a one-time cost per document: once a filing has been embedded and stored, you can switch between indexed documents without re-embedding. If you re-index a filing that is already present, only that filing's chunks are replaced.
 
 **3. Query from Python or validation scripts**
 
@@ -114,14 +116,20 @@ streamlit run app.py
 
 The Streamlit UI shows the available raw PDFs, lets you choose the active indexed filing, and shows the answer with citations plus a collapsible retrieved-context panel for transparency.
 
+You must index at least one filing before the app can answer queries.
+
 ### Limitations & what I'd do next
 
 **Current limitations**
 
 - The embedding model is lightweight and general-purpose, not finance-specific.
+- The system uses one embedding model for both indexing and retrieval, with no task-specific or document-specific embedding strategy.
 - Retrieval does not yet use a reranker, so the top-k set can still include near-misses.
 - Multiple filings can be stored together, but every query still requires one active document scope.
 - Intent classification is rule-based, so new query styles may require synonym updates.
+- Page-level sourcing is not preserved in metadata, so citations resolve to section and chunk rather than exact PDF page.
+- LLM outputs are not perfectly deterministic in practice, even with `temperature=0`, so edge-case answers and abstentions can vary slightly across runs.
+- Queries with significant typos may cause abstention since both the embedding model and keyword matcher expect reasonable spelling.
 - LLM-based answering and grounding checks add latency and cost.
 
 **What I’d do next**
@@ -137,7 +145,8 @@ The Streamlit UI shows the available raw PDFs, lets you choose the active indexe
 - **Traceability & Citations**: Every answer includes numbered citations `[1]`, `[2]` mapping to specific document sections with metadata (doc_id, section, chunk_id)
 - **Confidence-Based Abstention**: System abstains with clear reasoning when retrieval quality is poor, context is insufficient, or verification fails
 - **Intent-Based Hybrid Retrieval**: Combines semantic vector search with keyword fallback, using rule-based intent classification (HQ_LOCATION, INCORPORATION, BUSINESS_OVERVIEW, FINANCIALS_REVENUE, RISKS, AUDITOR) to prioritize relevant sections
-- **Single-Document Mode Awareness**: Automatically downweights entity terms when only one document exists, preventing entity matches from dominating ranking
+- **Active-Document Query Scoping**: Multiple filings can share one index, but retrieval is always filtered to one explicit `active_doc_id`
+- **Single-Document Mode Awareness**: When only one document exists in the index, entity terms are downweighted so they do not dominate ranking
 - **Evidence Pattern Matching**: Uses regex patterns to detect strong signals (e.g., "headquartered in Austin, Texas") for improved retrieval quality
 - **Logging & Observability**: Structured Python `logging` (no bare `print()`) with `debug=True` for intent classification, retrieval scores, chunk metadata, and confidence decisions
 - **Modular Pipeline**: Clean separation of concerns (parser → retriever → generator → verifier) for easy extension and testing
@@ -152,13 +161,15 @@ The Streamlit UI shows the available raw PDFs, lets you choose the active indexe
 3. **Embedding**: Sentence-transformer embeddings (`paraphrase-MiniLM-L3-v2`) for semantic search
 4. **Storage**: Persistent ChromaDB with metadata (doc_id, section, chunk_id) for traceability
 
-**Query Pipeline** (`rag_pipeline/retriever/hybrid_retrieve.py`, `rag_pipeline/retriever/intent_classifier.py`):
-1. **Intent Classification**: Rule-based classification using synonym matching (6 intent types)
-2. **Semantic Retrieval**: Vector similarity search using query embeddings
-3. **Intent Coverage Check**: Evaluates if semantic results contain intent keywords or evidence patterns
-4. **Keyword Fallback**: Full-corpus keyword search if semantic results lack intent coverage
-5. **Scoring**: `10×intent_matches + 3×evidence_patterns + entity_weight×entity_matches + length_bonus`
-6. **Tiny Chunk Filtering**: Removes chunks < 200 chars before final selection
+**Query Pipeline** (`rag_pipeline/retriever/hybrid_retrieve.py`, `rag_pipeline/retriever/intent_classifier.py`, `rag_pipeline/retriever/chroma_client.py`):
+1. **Active Document Resolution**: Validates the requested `active_doc_id` and refuses ambiguous multi-document queries
+2. **Document Filtering**: Applies `doc_id` filtering before semantic retrieval and keyword fallback so a query only sees one filing
+3. **Intent Classification**: Rule-based classification using synonym matching (6 intent types)
+4. **Semantic Retrieval**: Vector similarity search using query embeddings
+5. **Intent Coverage Check**: Evaluates if semantic results contain intent keywords or evidence patterns
+6. **Keyword Fallback**: Full-corpus keyword search if semantic results lack intent coverage
+7. **Scoring**: `10×intent_matches + 3×evidence_patterns + entity_weight×entity_matches + length_bonus`
+8. **Tiny Chunk Filtering**: Removes chunks < 200 chars before final selection
 
 **Generation** (`rag_pipeline/llm/generator.py`):
 1. **Prompt Formatting**: Creates prompt with numbered context chunks and citation instructions
@@ -183,9 +194,11 @@ The Streamlit UI shows the available raw PDFs, lets you choose the active indexe
 
 **Why Structured JSON for Abstention?** The generation prompt requires the model to return `{"is_answerable": bool, "answer": str}` so the application can distinguish answerable versus unanswerable cases without fragile string matching. This improves reliability, but it also means the generation step depends on consistent structured output from the model.
 
+**Why Active-Document Querying?** Storing multiple filings in one index avoids repeated embedding work, but unscoped queries would risk mixing companies in retrieval. Requiring an explicit active document keeps answers and citations confined to one filing at the cost of one extra parameter when more than one document is indexed.
+
 **Intent-Based Scoring:** Instead of relying solely on vector similarity (which can be noisy), the system scores chunks by intent keyword matches and evidence patterns. This prioritizes chunks that actually contain relevant information (e.g., ITEM 2 for HQ questions) over semantically similar but irrelevant chunks.
 
-**Single-Document Mode:** When only one document exists, entity terms (e.g., "Tesla") appear in nearly every chunk, making them poor discriminators. The system automatically detects single-doc mode and downweights entity matches (0.1x vs 0.5x) to prioritize intent signals.
+**Single-Document Mode:** When only one document exists in the index, entity terms (e.g., "Tesla") appear in nearly every chunk, making them poor discriminators. The system automatically detects single-doc mode and downweights entity matches (0.1x vs 0.5x) to prioritize intent signals.
 
 ## Repository Structure
 
@@ -197,18 +210,26 @@ hallucination-resistant-finance-rag/
 │   └── chroma_index/              # Persistent ChromaDB vector store
 │
 ├── rag_pipeline/                  # Core application code
+│   ├── __init__.py
+│   ├── evaluation/
+│   │   └── __init__.py
+│   ├── ingest/
+│   │   └── embed.py
 │   ├── parser/
+│   │   ├── __init__.py
 │   │   ├── pdf_loader.py         # PDF text extraction, section parsing
 │   │   └── chunker.py            # Token-aware chunking with overlap
 │   │
 │   ├── retriever/
-│   │   ├── chroma_client.py      # Unified ChromaDB client (single-doc detection)
+│   │   ├── __init__.py
+│   │   ├── chroma_client.py      # Unified ChromaDB client and active-doc resolution
 │   │   ├── embed_store.py        # Embedding computation & ChromaDB storage
 │   │   ├── retrieve.py           # Entry point: query_chunks() → hybrid_retrieve()
 │   │   ├── hybrid_retrieve.py    # Intent-based hybrid retrieval (semantic + keyword)
 │   │   └── intent_classifier.py  # Rule-based intent classification (6 types)
 │   │
 │   ├── llm/
+│   │   ├── __init__.py
 │   │   └── generator.py          # Prompt formatting, LLM generation, logging
 │   │
 │   └── verifier/
@@ -268,7 +289,7 @@ The CLI is interactive:
 4. If the selected document is already indexed, it asks whether you want to re-index just that document.
 5. Existing chunks for other indexed documents are left untouched.
 
-This means the workflow after running `embed_chunks_cli.py` is file-selection driven rather than hardcoded to a single source document. You can keep Tesla and JPMorgan Chase in the same index, then switch query targets by selecting a different active document in the UI or by passing `active_doc_id` in code.
+This means the workflow after running `embed_chunks_cli.py` is file-selection driven rather than hardcoded to a single source document. You can keep Tesla and JPMorgan Chase in the same index, then switch query targets by selecting a different active document in the UI or by passing `active_doc_id` in code. Switching between already indexed documents does not require re-embedding.
 
 ### Querying
 
@@ -294,6 +315,8 @@ answer, abstained = generate_answer_with_gate("Where is the company headquartere
 print(f"Answer: {answer}")
 print(f"Abstained: {abstained}")
 ```
+
+If more than one filing is indexed, omitting `active_doc_id` raises an error rather than risking cross-document retrieval.
 
 ## Testing & Evaluation
 
@@ -357,7 +380,7 @@ warehousing, engineering, retail and service locations, and administrative offic
 **System Logs** (with `debug=True`):
 ```
 rag_pipeline.retriever.hybrid_retrieve - DEBUG - Detected intents: ['HQ_LOCATION'], confidence: 0.45
-rag_pipeline.retriever.hybrid_retrieve - DEBUG - Single-doc mode: True
+rag_pipeline.retriever.hybrid_retrieve - DEBUG - Active document scope: tesla-2024-10K
 rag_pipeline.retriever.hybrid_retrieve - DEBUG - Semantic coverage: has_coverage=True, intent_matches=1, evidence_hits=1
 rag_pipeline.retriever.hybrid_retrieve - DEBUG - Final result_chunks count=1
 rag_pipeline.llm.generator - INFO - Query: Where is the company headquartered?
@@ -368,17 +391,19 @@ rag_pipeline.llm.generator - INFO -   [1] tesla-2024-10K::ITEM 2. PROPERTIES::ch
 
 **Current Limitations:**
 - **Embedding Model**: Uses `paraphrase-MiniLM-L3-v2` (384-dim), which may not capture domain-specific financial terminology optimally
+- **Single Embedding Strategy**: The same embedding model is used for all indexed filings and all queries; there is no per-document or task-specific embedding selection
 - **No Reranking**: Top-k retrieval without cross-encoder reranking can miss subtle relevance signals
-- **Single-Document Focus**: Optimized for single 10-K queries; multi-document scenarios may need permission/access control
+- **No Page-Level Citations**: Metadata does not currently preserve PDF page numbers, so citations resolve to section and chunk rather than exact page
 - **Rule-Based Intent**: Intent classification is rule-based; may miss nuanced queries or require manual synonym updates
 - **Typo Sensitivity**: Queries with significant typos may cause abstention since both the embedding model and keyword matcher expect reasonable spelling
+- **Residual Non-Determinism**: Even with `temperature=0`, model outputs and abstention behavior can vary slightly across runs
 - **LLM-as-a-Judge Cost**: Grounding verification uses a `gpt-4o-mini` call per answer, adding latency and cost; a local NLI model could reduce this
 - **Frontend Scope Is Minimal**: The Streamlit app is intentionally narrow and does not yet support indexing, multi-document workflows, or richer citation browsing
 
 **Planned Improvements:**
 - **Reranker Integration**: Add cross-encoder reranking (e.g., `ms-marco-MiniLM`) to refine top-k results
 - **Better Evaluators**: Implement claim-level attribution, fact-checking against source, and automated evaluation metrics
-- **Multi-Document Support**: Add document-level permissions, filtering, and multi-doc query routing
+- **Multi-Document Policy**: Add document-level permissions, filtering policies, and richer multi-doc workflow controls on top of the current active-doc filter
 - **Cost Control**: Add caching for repeated queries, token usage tracking, and cost-aware model selection
 - **UI/Frontend**: Expand the Streamlit app to support indexing actions, richer source inspection, and better document switching
 - **Domain-Specific Embeddings**: Fine-tune or use financial-domain embeddings (e.g., FinBERT) for better semantic understanding
