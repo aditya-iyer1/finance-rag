@@ -13,14 +13,14 @@ from rag_pipeline.retriever.retrieve import query_chunks
 load_dotenv()
 PDF_DIR = "data/raw-pdfs"
 
-st.set_page_config(page_title="Finance Filing Q&A", page_icon=":bar_chart:", layout="wide")
+st.set_page_config(page_title="Finance Filing Q&A", layout="wide")
 
 
 def render_result_box(body: str, abstained: bool) -> None:
     if abstained:
-        st.warning(body, icon="⚠️")
+        st.warning(body)
     else:
-        st.success(body, icon="✅")
+        st.success(body)
 
 
 def format_distance(distance) -> str:
@@ -158,4 +158,4 @@ if st.button("Ask", type="primary", use_container_width=False):
 
 
 if not os.environ.get("OPENAI_API_KEY"):
-    st.sidebar.warning("`OPENAI_API_KEY` is not set.", icon="⚠️")
+    st.sidebar.warning("`OPENAI_API_KEY` is not set.")
