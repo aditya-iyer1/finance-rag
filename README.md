@@ -162,14 +162,22 @@ pip install -r requirements.txt
 ### Indexing Documents
 
 ```bash
-# Index the default PDF (data/raw-pdfs/tesla-2024-10K.pdf → data/chroma_index/)
+# Launch the interactive indexer (select a PDF from data/raw-pdfs/)
 python embed_chunks_cli.py
 
 # With verbose output (section list, metadata samples, progress bar)
 python embed_chunks_cli.py --verbose
 ```
 
-> **Note:** The PDF path is currently set in `embed_chunks_cli.py`. Edit the `pdf_path` variable to index a different filing.
+The CLI is interactive:
+
+1. It scans `data/raw-pdfs/` for available 10-K PDFs.
+2. It shows a numbered menu so you can choose which filing to index.
+3. It parses the selected PDF into ITEM sections, chunks the text, embeds those chunks, and stores them in ChromaDB.
+4. If the current index already contains a different document, it prompts before clearing and replacing that index.
+5. If the same document is already indexed, it asks whether you want to re-index it.
+
+This means the workflow after running `embed_chunks_cli.py` is now file-selection driven rather than hardcoded to a single source document. The query pipeline still targets one indexed filing at a time, so switching from Tesla to JPMorgan Chase (or back) is done by re-running the CLI and selecting the other PDF.
 
 ### Querying
 
@@ -190,6 +198,29 @@ print(f"Abstained: {abstained}")
 ```
 
 ## Testing & Evaluation
+
+### Validation Scripts
+
+The repo includes two validation entry points that exercise the same retrieval and answer-generation pipeline against different indexed filings:
+
+```bash
+# Tesla-focused validation matrix
+python run_validation.py
+
+# JPMorgan Chase-focused validation matrix
+python run_validation_jpmc.py
+```
+
+Use `--debug` with either script to surface retrieval logs and `--no-color` for plain ASCII output.
+
+To test against a specific filing:
+
+1. Run `python embed_chunks_cli.py`.
+2. Select the Tesla or JPMorgan Chase 10-K from `data/raw-pdfs/`.
+3. Let the CLI replace the current index if prompted.
+4. Run the matching validation script for that indexed document.
+
+The Tesla matrix checks Tesla-specific known-answer and abstention cases. The JPMorgan Chase matrix does the same for JPMC, including questions like headquarters, business overview, auditor, risk factors, and incorporation, plus out-of-scope prompts that should abstain.
 
 ### Query Test Matrix
 

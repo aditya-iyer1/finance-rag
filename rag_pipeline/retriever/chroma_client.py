@@ -23,6 +23,13 @@ _client_cache = None
 _persist_dir_cache = None
 
 
+def reset_client():
+    """Reset the cached client. Call after deleting/recreating the index directory."""
+    global _client_cache, _persist_dir_cache
+    _client_cache = None
+    _persist_dir_cache = None
+
+
 def _get_project_root():
     """Get the project root directory (3 levels up from this file)."""
     return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

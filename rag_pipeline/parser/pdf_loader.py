@@ -24,20 +24,42 @@ def extract_raw_text_from_pdf(path: str) -> str:
 	return text
 
 def split_into_sections(text: str) -> Dict[str, str]:
-    pattern = re.compile(r"(ITEM\s+\d+[A]?(?:\.\d+)?\.?\s+.+?)(?=\nITEM\s+\d+[A]?|\Z)", re.DOTALL)
+    # Pattern handles both formats:
+    # - Tesla: "Item 1.\nBusiness\n4\nItem 1A." (title on separate line)
+    # - JPMC: "Item 1.\nBusiness.    . . . . . . .\n1\nItem 1A." (title with dot leaders & page num)
+    # The lookahead matches the next Item header or end of string
+    pattern = re.compile(
+        r"^(Item\s+\d{1,2}[A-C]?\.?).*?(\n|\Z)(.+?)"
+        r"(?=^Item\s+\d{1,2}[A-C]?|\Z)",
+        re.DOTALL | re.IGNORECASE | re.MULTILINE
+    )
     matches = list(pattern.finditer(text))
     sections = {}
 
     covered_spans = []
     for i, match in enumerate(matches):
-        title_line = match.group(1).split('\n')[0].strip()
-        content = match.group(1).strip()
+        # Extract: "Item 1" or "Item 1A" (without the trailing dot for clean naming)
+        item_part = match.group(1).strip()
+        # Extract title from content (first line after item number)
+        content = match.group(3).strip()
+        first_line = content.split('\n')[0].strip() if content else ""
+        # Clean title: remove dot leaders (". . . .") and page numbers like "32"
+        title_clean = re.sub(r'[.\s]+\.\s*', ' ', first_line)  # "Business.    . . ." -> "Business"
+        title_clean = re.sub(r'\s+\d+\s*$', '', title_clean)  # Remove trailing page numbers
+        title_clean = re.sub(r'\s+', ' ', title_clean).strip()  # Normalize whitespace
+        # Combine: "Item 1. Business" (avoid double dots)
+        if title_clean:
+            # item_part is like "Item 1." or "Item 1A." - already has trailing dot
+            title_line = f"{item_part} {title_clean}"
+        else:
+            title_line = item_part.rstrip('.')
+        
         covered_spans.append((match.start(), match.end()))
 
         if title_line in sections:
             title_line = f"{title_line} (part {i})"
 
-        sections[title_line] = content
+        sections[title_line] = match.group(1).strip() + "\n" + content
 
     # Append leftover text (outside ITEMs)
     last_match_end = covered_spans[-1][1] if covered_spans else 0
